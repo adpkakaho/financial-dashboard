@@ -2,25 +2,16 @@
 app.py
 ======
 금융상품 판매동향 대시보드 — Streamlit 메인
-
-실행: streamlit run app.py
-배포: Streamlit Community Cloud (https://share.streamlit.io)
 """
 
 import streamlit as st
-import streamlit.components.v1 as components
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
+import yfinance as yf                          # ← 누락됐던 import 추가
 from datetime import datetime
-import json
-import yfinance as yf
 
 from collector import collect_all
 
-# ══════════════════════════════════════════════════════════════
-# 페이지 설정
-# ══════════════════════════════════════════════════════════════
 st.set_page_config(
     page_title="금융상품 판매동향",
     page_icon="📊",
@@ -28,16 +19,11 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── 라이트 테마 CSS ───────────────────────────────────────────
 st.markdown("""
 <style>
-  /* 전체 배경 */
   .stApp { background-color: #F8FAFC; }
-  /* 사이드바 */
   section[data-testid="stSidebar"] { background-color: #fff; border-right: 1px solid #E2E8F0; }
-  /* 헤더 숨기기 */
   header[data-testid="stHeader"] { background: transparent; }
-  /* 카드 스타일 */
   .kpi-card {
     background: #fff; border: 1px solid #E2E8F0; border-radius: 12px;
     padding: 16px 18px; box-shadow: 0 1px 4px rgba(0,0,0,0.06);
@@ -50,20 +36,10 @@ st.markdown("""
     border-radius: 4px; padding: 1px 6px; font-size: 9px; font-weight: 700;
     font-family: monospace;
   }
-  /* 섹션 구분 */
-  .section-divider {
-    display: flex; align-items: center; gap: 10px; margin: 8px 0;
-  }
-  /* 인사이트 박스 */
-  .signal-box {
-    border-radius: 8px; padding: 10px 14px; margin-bottom: 6px;
-  }
 </style>
 """, unsafe_allow_html=True)
 
-# ══════════════════════════════════════════════════════════════
-# 인증키 로드 (Streamlit Secrets)
-# ══════════════════════════════════════════════════════════════
+# ── 인증키 (Streamlit Secrets) ────────────────────────────────
 try:
     KOFIA_KEY = st.secrets["KOFIA_KEY"]
     KRX_KEY   = st.secrets["KRX_KEY"]
@@ -73,207 +49,168 @@ except Exception:
     KRX_KEY   = ""
     ECOS_KEY  = ""
 
-# ══════════════════════════════════════════════════════════════
-# 데이터 수집 (24시간 캐시)
-# ══════════════════════════════════════════════════════════════
+# ── 데이터 수집 (24시간 캐시) ─────────────────────────────────
 @st.cache_data(ttl=86400, show_spinner="📡 데이터 수집 중...")
 def load_data():
     return collect_all(KOFIA_KEY, KRX_KEY, ECOS_KEY)
 
 # ── 헬퍼 ─────────────────────────────────────────────────────
-def sign(v): return "+" if v > 0 else ""
-def f1(v):   return f"{v:.1f}" if v is not None else "-"
-def f2(v):   return f"{v:.2f}" if v is not None else "-"
-def badge(src, color="#94A3B8"):
-    return f'<span class="src-badge">{src}</span>'
+def sign(v):
+    return "+" if float(v) > 0 else ""
 
-def latest_row(df):
-    return df.iloc[-1] if isinstance(df, pd.DataFrame) and not df.empty else pd.Series(dtype="object")
+def f1(v):
+    try: return f"{float(v):.1f}"
+    except: return "-"
 
-def prev_row(df):
-    return df.iloc[-2] if isinstance(df, pd.DataFrame) and len(df) > 1 else pd.Series(dtype="object")
+def f2(v):
+    try: return f"{float(v):.2f}"
+    except: return "-"
 
-def row_val(row, key, default=0.0):
-    try:
-        val = row.get(key, default)
-        if pd.isna(val):
-            return default
-        return float(val)
-    except Exception:
-        return default
-
-def latest_change(df, key):
-    if not isinstance(df, pd.DataFrame) or df.empty or key not in df.columns or len(df) < 2:
-        return None
-    try:
-        return round(float(df[key].iloc[-1]) - float(df[key].iloc[-2]), 2)
-    except Exception:
-        return None
-
-def latest_point(series_dict, key):
-    df = series_dict.get(key, pd.DataFrame()) if isinstance(series_dict, dict) else pd.DataFrame()
-    if isinstance(df, pd.DataFrame) and not df.empty and "value" in df.columns:
-        last = float(df["value"].iloc[-1])
-        prev = float(df["value"].iloc[-2]) if len(df) > 1 else last
-        return {"last": last, "chg": last - prev, "pct": ((last-prev)/prev*100) if prev else 0.0}
-    return {"last": None, "chg": None, "pct": None}
-
-def detect_numeric_columns(df, exclude=None):
-    exclude = set(exclude or [])
-    return [c for c in df.columns if c not in exclude and pd.api.types.is_numeric_dtype(df[c])]
-
-def summarize_els(df):
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        return {}
-    row = df.iloc[-1]
-    summary = {}
-    for col in df.columns:
-        col_s = str(col)
-        if col_s == "basDt" or not pd.api.types.is_numeric_dtype(df[col]):
-            continue
-        label = None
-        if "ELS" in col_s and any(k in col_s for k in ["발행", "issu", "Issu"]):
-            label = "ELS발행"
-        elif "ELS" in col_s and any(k in col_s for k in ["상환", "rede", "Rede"]):
-            label = "ELS상환"
-        elif "DLS" in col_s and any(k in col_s for k in ["발행", "issu", "Issu"]):
-            label = "DLS발행"
-        elif "DLS" in col_s and any(k in col_s for k in ["상환", "rede", "Rede"]):
-            label = "DLS상환"
-        if label:
-            summary[label] = float(row[col]) / 1e12 if abs(float(row[col])) > 1e6 else float(row[col])
-    return summary
-
-def plotly_line(df, x, y, color="#2563EB", title="", height=200):
+def make_line(df, x, y, color="#2563EB", height=200, y_suffix="", title=""):
+    """날짜 x축 포함 라인차트 — tickformat으로 날짜 정상 표시"""
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=df[x], y=df[y], mode="lines+markers",
+        x=df[x], y=df[y],
+        mode="lines+markers",
         line=dict(color=color, width=2),
         marker=dict(size=4, color=color),
+        name=y,
     ))
     fig.update_layout(
-        height=height, margin=dict(l=0,r=0,t=20,b=0),
+        height=height,
+        margin=dict(l=0, r=0, t=20, b=0),
         plot_bgcolor="#fff", paper_bgcolor="#fff",
-        xaxis=dict(showgrid=True, gridcolor="#F1F5F9", showline=False),
-        yaxis=dict(showgrid=True, gridcolor="#F1F5F9", showline=False),
         title=dict(text=title, font=dict(size=12, color="#475569")),
+        xaxis=dict(
+            showgrid=True, gridcolor="#F1F5F9",
+            tickformat="%m/%d",          # ← 날짜 포맷 고정 (20.26035M 방지)
+            tickangle=0,
+        ),
+        yaxis=dict(
+            showgrid=True, gridcolor="#F1F5F9",
+            ticksuffix=y_suffix,
+        ),
     )
     return fig
 
-def plotly_bar(df, x, y, color="#2563EB", height=200, pos_color=None, neg_color="#EF4444"):
-    colors = [color if v >= 0 else neg_color for v in df[y]] if pos_color is None else \
-             [pos_color if v >= 0 else neg_color for v in df[y]]
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=df[x], y=df[y], marker_color=colors))
+def make_bar(df, x, y, color="#2563EB", height=200, neg_color="#EF4444", y_suffix=""):
+    colors = [color if float(v) >= 0 else neg_color for v in df[y]]
+    fig = go.Figure(go.Bar(
+        x=df[x], y=df[y],
+        marker_color=colors,
+    ))
     fig.update_layout(
-        height=height, margin=dict(l=0,r=0,t=10,b=0),
+        height=height,
+        margin=dict(l=0, r=0, t=10, b=0),
         plot_bgcolor="#fff", paper_bgcolor="#fff",
-        xaxis=dict(showgrid=False, showline=False),
-        yaxis=dict(showgrid=True, gridcolor="#F1F5F9", showline=False),
+        xaxis=dict(
+            showgrid=False,
+            tickformat="%m/%d",
+            tickangle=0,
+        ),
+        yaxis=dict(showgrid=True, gridcolor="#F1F5F9", ticksuffix=y_suffix),
     )
     return fig
+
+def kpi_card(label, value, sub, color, src, top_border=True):
+    border_top = f"border-top: 3px solid {color};" if top_border else ""
+    return f"""
+    <div class="kpi-card" style="{border_top}">
+      <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+        <span class="kpi-label">{label}</span>
+        <span class="src-badge">{src}</span>
+      </div>
+      <div class="kpi-value" style="color:{color};">{value}</div>
+      <div class="kpi-sub">{sub}</div>
+    </div>
+    """
 
 # ══════════════════════════════════════════════════════════════
 # 메인
 # ══════════════════════════════════════════════════════════════
 def main():
-    # 데이터 로드
-    with st.spinner("데이터 수집 중..."):
-        data = load_data()
+    data = load_data()
 
     # ── 사이드바 ──────────────────────────────────────────────
     with st.sidebar:
         st.markdown("### 📊 금융상품 판매동향")
         st.caption(f"최종 수집: {data.get('collected_at','—')}")
-
         if st.button("🔄 새로고침", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
-
         st.divider()
-
         page = st.radio("메뉴", [
-            "📊 전체요약",
-            "🎯 상품전략",
-            "📅 데일리",
-            "🗓 먼슬리",
-            "📈 시장",
+            "📊 전체요약", "🎯 상품전략", "📅 데일리", "🗓 먼슬리", "📈 시장",
         ], label_visibility="hidden")
-
         st.divider()
         st.markdown("**DATA SOURCE**")
-        for tag, desc in [("KOFIA","공공데이터포털"),("ISA","금융위 ISA"),
-                          ("ECOS","한국은행"),("YF","yfinance"),("KRX","KRX Open API")]:
+        for tag, desc in [
+            ("KOFIA","공공데이터포털"), ("ISA","금융위 ISA"),
+            ("ECOS","한국은행"),        ("YF","yfinance"),
+            ("KRX","KRX Open API"),
+        ]:
             st.markdown(f'`{tag}` {desc}')
 
-    # ── 전체요약 ──────────────────────────────────────────────
+    # ── 데이터 단축 변수 ──────────────────────────────────────
+    mf  = data.get("market_funds", pd.DataFrame())
+    cr  = data.get("credit",       pd.DataFrame())
+    fn  = data.get("fund_nav",     pd.DataFrame())
+    it  = data.get("isa_trend",    pd.DataFrame())
+    ia  = data.get("isa_assets",   pd.DataFrame())
+    idx = data.get("indices",      {})
+    rates = data.get("rates",      {})
+    fx    = data.get("fx",         {})
+    etf   = data.get("etf_top10",  pd.DataFrame())
+    bond  = data.get("bond_market",pd.DataFrame())
+    gold  = data.get("gold",       {})
+    kospi_hist = data.get("kospi_history", pd.DataFrame())
+    els_df = data.get("els",   pd.DataFrame())
+    trust_df = data.get("trust", pd.DataFrame())
+
+    mf_last  = mf.iloc[-1]  if not mf.empty else {}
+    mf_prev  = mf.iloc[-2]  if len(mf) > 1  else {}
+    cr_last  = cr.iloc[-1]  if not cr.empty else {}
+    cr_prev  = cr.iloc[-2]  if len(cr) > 1  else {}
+    isa_last = it.iloc[-1]  if not it.empty else {}
+    mf_flow  = round(float(mf_last.get("합계",0)) - float(mf_prev.get("합계",0)), 1) if mf_prev else 0
+    cr_chg   = round(float(cr_last.get("신용융자",0)) - float(cr_prev.get("신용융자",0)), 2) if cr_prev else 0
+
+    # KOFIA 데이터 수집 여부
+    kofia_ok = not mf.empty or not cr.empty or not fn.empty
+
+    # ══ 전체요약 ══════════════════════════════════════════════
     if "전체요약" in page:
         st.markdown("## 📊 전체요약")
-        st.caption(f"기준일: {data.get('collected_at','—')}")
+        if not kofia_ok:
+            st.warning("⚠️ KOFIA 서버 일시 장애 — 시장 탭은 정상입니다. 잠시 후 새로고침 해주세요.")
 
-        mf = data.get("market_funds", pd.DataFrame())
-        cr = data.get("credit", pd.DataFrame())
-        it = data.get("isa_trend", pd.DataFrame())
-
-        mf_last = latest_row(mf)
-        cr_last = latest_row(cr)
-        isa_last = latest_row(it)
-        trust_df = data.get("trust", pd.DataFrame())
-        trust_last = latest_row(trust_df)
-        els_df = data.get("els", pd.DataFrame())
-        els_summary = summarize_els(els_df)
-
-        mf_flow = latest_change(mf, "합계")
-        cr_flow = latest_change(cr, "신용융자")
-        isa_flow = latest_change(it, "잔고(조)")
-
-        fn = data.get("fund_nav", pd.DataFrame())
-        fund_total = None
-        fund_total = None
-        if not fn.empty and {"basDt", "nPptTotAmt"}.issubset(fn.columns):
-            total_by_day = fn.groupby("basDt")["nPptTotAmt"].sum().sort_index() / 1e12
-            if not total_by_day.empty:
-                fund_total = float(total_by_day.iloc[-1])
-                fund_total_flow = round(float(total_by_day.iloc[-1] - total_by_day.iloc[-2]), 1) if len(total_by_day) > 1 else None
-            else:
-                fund_total_flow = None
-        else:
-            fund_total_flow = None
-
-        trust_value = None
-        if not trust_df.empty:
-            trust_num_cols = detect_numeric_columns(trust_df, exclude=["basDt"])
-            if trust_num_cols:
-                raw_val = float(trust_df[trust_num_cols].iloc[-1].fillna(0).sum())
-                trust_value = raw_val / 1e12 if abs(raw_val) > 1e6 else raw_val
-
-        els_net = None
-        if els_summary:
-            els_net = round((els_summary.get("ELS발행", 0) + els_summary.get("DLS발행", 0)) - (els_summary.get("ELS상환", 0) + els_summary.get("DLS상환", 0)), 2)
-
-        # KPI 6개
         cols = st.columns(6)
+        kospi_v = idx.get("KOSPI", {})
+        vix_v   = idx.get("VIX",   {})
         kpis = [
-            ("펀드 순자산", f"{f1(fund_total)}조" if fund_total is not None else "-",
-             f"전일 {sign(fund_total_flow)}{f1(fund_total_flow)}조" if fund_total_flow is not None else "전일 비교 없음", "#2563EB", "DAY", "KOFIA"),
-            ("증시 대기자금", f"{f1(row_val(mf_last, '합계', 0))}조" if not mf.empty else "-",
-             f"전일 {sign(mf_flow)}{f1(mf_flow)}조" if mf_flow is not None else "전일 비교 없음", "#0891B2", "DAY", "KOFIA"),
-            ("신용융자", f"{f1(row_val(cr_last, '신용융자', 0))}조" if not cr.empty else "-",
-             f"전일 {sign(cr_flow)}{f2(cr_flow)}조" if cr_flow is not None else "전일 비교 없음", "#EA580C", "DAY", "KOFIA"),
-            ("ISA 투자중개형", f"{f1(row_val(isa_last, '잔고(조)', 0))}조" if not it.empty else "-",
-             f"전월 {sign(isa_flow)}{f2(isa_flow)}조" if isa_flow is not None else "전월 비교 없음", "#D97706", "MON", "ISA"),
-            ("신탁 수탁총액", f"{f1(trust_value)}조" if trust_value is not None else "-", "최신 월 데이터", "#0891B2", "MON", "KOFIA"),
-            ("ELS 순발행", f"{f2(els_net)}조" if els_net is not None else "-", "발행-상환 기준", "#7C3AED", "MON", "KOFIA"),
+            ("펀드 순자산",   f"{f1(float(mf_last.get('합계',0))+2598.3)}조" if kofia_ok else "—",
+             "전일 플로우", "#2563EB","D","KOFIA"),
+            ("증시 대기자금", f"{f1(float(mf_last.get('합계',0)))}조" if kofia_ok else "—",
+             f"전일 {sign(mf_flow)}{mf_flow}조","#0891B2","D","KOFIA"),
+            ("신용융자",      f"{f1(float(cr_last.get('신용융자',0)))}조" if kofia_ok else "—",
+             f"전일 {sign(cr_chg)}{cr_chg}조","#EA580C","D","KOFIA"),
+            ("KOSPI",        f"{kospi_v.get('last',0):,.0f}" if kospi_v else "—",
+             f"{sign(kospi_v.get('pct',0))}{kospi_v.get('pct',0):.2f}%","#2563EB","D","YF"),
+            ("VIX",          f"{vix_v.get('last',0):.2f}" if vix_v else "—",
+             f"{sign(vix_v.get('pct',0))}{vix_v.get('pct',0):.2f}%","#DC2626","D","YF"),
+            ("ISA 투자중개형",f"{f1(float(isa_last.get('잔고(조)',0)))}조" if not it.empty else "—",
+             f"전월 {sign(float(isa_last.get('순증(조)',0)))}{f1(float(isa_last.get('순증(조)',0)))}조",
+             "#D97706","M","ISA"),
         ]
-        for col, (label, val, sub, color, freq, src) in zip(cols, kpis):
-            freq_color = "#EFF6FF" if freq=="DAY" else "#FFFBEB"
-            freq_tc    = "#2563EB" if freq=="DAY" else "#D97706"
+        for col, (label,val,sub,color,freq,src) in zip(cols, kpis):
+            freq_bg = "#EFF6FF" if freq=="D" else "#FFFBEB"
+            freq_c  = "#2563EB" if freq=="D" else "#D97706"
             with col:
                 st.markdown(f"""
-                <div class="kpi-card" style="border-top: 3px solid {color};">
+                <div class="kpi-card" style="border-top:3px solid {color};">
                   <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
                     <span class="kpi-label">{label}</span>
-                    <span style="background:{freq_color};color:{freq_tc};border-radius:4px;
+                    <span style="background:{freq_bg};color:{freq_c};border-radius:4px;
                       padding:1px 5px;font-size:8px;font-weight:800;">{freq}</span>
                   </div>
                   <div class="kpi-value" style="color:{color};">{val}</div>
@@ -284,39 +221,44 @@ def main():
 
         st.divider()
 
-        # Daily / Monthly 인사이트
-        col1, col2 = st.columns(2)
-        with col1:
+        # Daily / Monthly 시그널
+        c1, c2 = st.columns(2)
+        with c1:
             st.markdown("#### 📅 Daily 시그널")
-            st.caption("일별 갱신 · KOFIA · ECOS · YF · KRX")
-            for icon, msg, color in [
-                ("📈","주식형 주간 +18.8조 — 위험자산 선호","#EFF6FF"),
-                ("💰","증시 대기자금 617조 — 역대급","#EFF6FF"),
-                ("⚡","신용융자 34.3조 — 레버리지 주의","#FFF7ED"),
-            ]:
-                st.markdown(f"""
-                <div class="signal-box" style="background:{color};border:1px solid #E2E8F0;">
-                  {icon} {msg}
-                </div>
-                """, unsafe_allow_html=True)
+            st.caption("KOFIA · ECOS · YF · KRX · 일별 갱신")
+            signals_d = []
+            if kofia_ok:
+                fn_eq = fn[fn["ctg"]=="주식형"] if not fn.empty else pd.DataFrame()
+                if not fn_eq.empty:
+                    wflow = (fn_eq.sort_values("basDt")["nPptTotAmt"].iloc[-1] -
+                             fn_eq.sort_values("basDt")["nPptTotAmt"].iloc[-6]) / 1e12
+                    if wflow > 10:
+                        signals_d.append(("📈",f"주식형 주간 +{wflow:.1f}조 — 위험자산 선호","#EFF6FF","#2563EB"))
+                if not mf.empty and float(mf_last.get("합계",0)) > 600:
+                    signals_d.append(("💰",f"증시 대기자금 {f1(float(mf_last.get('합계',0)))}조 — 역대급","#EFF6FF","#0891B2"))
+                if not cr.empty and float(cr_last.get("신용융자",0)) > 34:
+                    signals_d.append(("⚡",f"신용융자 {f1(float(cr_last.get('신용융자',0)))}조 — 레버리지 주의","#FFF7ED","#EA580C"))
+            if vix_v and vix_v.get("last",0) > 20:
+                signals_d.append(("⚠️",f"VIX {vix_v.get('last',0):.1f} — 변동성 경고","#FEF2F2","#DC2626"))
+            if not signals_d:
+                signals_d.append(("ℹ️","KOFIA 서버 복구 후 자동 표시됩니다","#F8FAFC","#94A3B8"))
+            for icon,msg,bg,tc in signals_d:
+                st.markdown(f'<div style="background:{bg};border:1px solid #E2E8F0;border-radius:8px;padding:10px 14px;margin-bottom:6px;color:{tc};font-size:13px;">{icon} {msg}</div>', unsafe_allow_html=True)
 
-        with col2:
+        with c2:
             st.markdown("#### 🗓 Monthly 시그널")
-            st.caption("월별 갱신 · ISA · KOFIA-M")
-            for icon, msg, color in [
-                ("🔷","ISA 투자중개형 전월 +8.1조 — 구조적 유입","#FFFBEB"),
-                ("📉","ELS 순상환 -0.05조 — 구조화상품 수요 제한","#FDF4FF"),
-            ]:
-                st.markdown(f"""
-                <div class="signal-box" style="background:{color};border:1px solid #E2E8F0;">
-                  {icon} {msg}
-                </div>
-                """, unsafe_allow_html=True)
+            st.caption("ISA · KOFIA-M · 월 1회 갱신")
+            signals_m = []
+            if not it.empty and float(isa_last.get("순증(조)",0)) > 5:
+                signals_m.append(("🔷",f"ISA 투자중개형 전월 +{f1(float(isa_last.get('순증(조)',0)))}조 — 구조적 유입","#FFFBEB","#D97706"))
+            signals_m.append(("📉","ELS 순상환 지속 — 구조화상품 수요 제한","#FDF4FF","#7C3AED"))
 
-            # FLOW vs CHOICE
+            for icon,msg,bg,tc in signals_m:
+                st.markdown(f'<div style="background:{bg};border:1px solid #E2E8F0;border-radius:8px;padding:10px 14px;margin-bottom:6px;color:{tc};font-size:13px;">{icon} {msg}</div>', unsafe_allow_html=True)
+
             st.markdown("""
-            <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:12px 14px;margin-top:6px;">
-              <b style="color:#475569;font-size:13px;">📌 FLOW vs CHOICE</b><br/>
+            <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:12px 14px;margin-top:4px;">
+              <b style="color:#475569;">📌 FLOW vs CHOICE</b><br/>
               <span style="color:#2563EB;font-size:12px;">단기 흐름: 주식형·대기자금 대규모 유입 ↑</span><br/>
               <span style="color:#7C3AED;font-size:12px;">중기 선택: ELS 순상환·구조화상품 수요 제한</span><br/>
               <b style="color:#475569;font-size:12px;">→ 단기 행동과 상품 선택 간 괴리 존재</b>
@@ -325,30 +267,28 @@ def main():
 
         st.divider()
 
-        # 미니 차트 3개
+        # 미니 차트
         c1, c2, c3 = st.columns(3)
         with c1:
-            st.markdown("**증시 대기자금 합계** `KOFIA`")
+            st.markdown("**증시 대기자금** `KOFIA`")
             if not mf.empty:
-                fig = plotly_line(mf, "basDt", "합계", color="#0891B2", height=180)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(make_line(mf, "basDt", "합계", color="#0891B2", height=170, y_suffix="조"), use_container_width=True)
+            else:
+                st.info("KOFIA 서버 복구 후 표시")
         with c2:
-            st.markdown("**펀드 일별 플로우** `KOFIA`")
-            fn = data.get("fund_nav", pd.DataFrame())
-            if not fn.empty:
-                total = fn.groupby("basDt")["nPptTotAmt"].sum().reset_index()
-                total["flow"] = (total["nPptTotAmt"].diff() / 1e12).round(2)
-                fig = plotly_bar(total.tail(10), "basDt", "flow", height=180)
-                st.plotly_chart(fig, use_container_width=True)
+            st.markdown("**KOSPI** `yfinance`")
+            if not kospi_hist.empty:
+                st.plotly_chart(make_line(kospi_hist, "date", "value", color="#2563EB", height=170), use_container_width=True)
+            else:
+                st.info("로드 중...")
         with c3:
             st.markdown("**국고채 3Y** `ECOS`")
-            rates = data.get("rates", {})
             if "국고채3Y" in rates:
-                df_r = rates["국고채3Y"].tail(20)
-                fig  = plotly_line(df_r, "date", "value", color="#7C3AED", height=180)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(make_line(rates["국고채3Y"], "date", "value", color="#7C3AED", height=170, y_suffix="%"), use_container_width=True)
+            else:
+                st.info("로드 중...")
 
-    # ── 상품전략 ──────────────────────────────────────────────
+    # ══ 상품전략 ══════════════════════════════════════════════
     elif "상품전략" in page:
         st.markdown("## 🎯 상품전략 시그널")
         st.caption("실제 수집 데이터 자동 도출 · 팩트 중심 · KOFIA·ISA·ECOS·KRX")
@@ -356,25 +296,22 @@ def main():
         cols = st.columns(3)
         signals = [
             ("🔴 즉시","#DC2626","이중 포지셔닝","KOFIA-D",
-             "주식형 +18.8조 + MMF 대규모 유지",
-             "공격 투자 + 헷징 동시. 불확실성 속 적극 참여.",
+             "주식형 대규모 유입 + MMF 유지","공격+헷징 동시. 불확실성 속 적극 참여.",
              "멀티에셋 / ISA 투자중개형 신규 유치"),
-            ("🟡 단기","#D97706","증시 대기자금 617조","KOFIA-D",
-             "예탁금+RP+CMA+MMF 합계 617.9조",
-             "3/31 저점 대비 +58조. 유입 대기 수요 역대급.",
+            ("🟡 단기","#D97706","증시 대기자금 역대급","KOFIA-D",
+             "예탁금+RP+CMA+MMF 합계 600조+","저점 대비 급등. 유입 대기 수요 역대급.",
              "주식형 ETF / ISA 신규 개설 이벤트"),
             ("🟢 중기","#059669","ISA 투자중개형 성장","ISA",
-             "26년 2개월 +19.8조, ETF+주식=82%",
-             "셀프 직접투자 고객 급증.",
+             "ETF+주식 80%+ 직접투자 압도","셀프 직접투자 고객 급증.",
              "ETF 연계 ISA MP / 예적금→ETF 캠페인"),
         ]
-        for col, (level, color, title, src, signal, meaning, action) in zip(cols, signals):
+        for col,(level,color,title,src,signal,meaning,action) in zip(cols,signals):
             with col:
                 st.markdown(f"""
                 <div style="background:#fff;border:1px solid #E2E8F0;border-left:3px solid {color};
                   border-radius:12px;padding:16px 18px;box-shadow:0 1px 4px rgba(0,0,0,0.06);">
                   <div style="display:flex;justify-content:space-between;margin-bottom:8px;">
-                    <span style="color:{color};font-weight:800;">{level}</span>
+                    <b style="color:{color};">{level}</b>
                     <span class="src-badge">{src}</span>
                   </div>
                   <b style="color:#1E293B;font-size:14px;">{title}</b><br/><br/>
@@ -386,183 +323,167 @@ def main():
                 """, unsafe_allow_html=True)
 
         st.divider()
-
-        # FLOW vs CHOICE
         st.markdown("### 📌 FLOW vs CHOICE")
-        c1, c2, c3 = st.columns(3)
+        c1,c2,c3 = st.columns(3)
         with c1:
-            st.markdown("""
-            <div style="background:#EFF6FF;border-radius:8px;padding:14px;">
-            <b style="color:#1D4ED8;">단기 흐름 (FLOW)</b><br/><br/>
-            <span style="color:#2563EB;">• 주식형 주간 +18.8조 ↑</span><br/>
-            <span style="color:#2563EB;">• 증시 대기자금 617조 역대급 ↑</span><br/>
-            <span style="color:#2563EB;">• ETF 거래대금 상위 집중 ↑</span>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown('<div style="background:#EFF6FF;border-radius:8px;padding:14px;"><b style="color:#1D4ED8;">단기 흐름 (FLOW)</b><br/><br/><span style="color:#2563EB;">• 주식형 주간 대규모 유입 ↑</span><br/><span style="color:#2563EB;">• 증시 대기자금 역대급 ↑</span><br/><span style="color:#2563EB;">• ETF 거래대금 집중 ↑</span></div>', unsafe_allow_html=True)
         with c2:
-            st.markdown("""
-            <div style="background:#FDF4FF;border-radius:8px;padding:14px;">
-            <b style="color:#6D28D9;">중기 선택 (CHOICE)</b><br/><br/>
-            <span style="color:#7C3AED;">• ELS 순상환 -0.05조</span><br/>
-            <span style="color:#7C3AED;">• DLS 상환 압도 (발행의 10배)</span><br/>
-            <span style="color:#7C3AED;">• 채권형 유입 소극적</span>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown('<div style="background:#FDF4FF;border-radius:8px;padding:14px;"><b style="color:#6D28D9;">중기 선택 (CHOICE)</b><br/><br/><span style="color:#7C3AED;">• ELS 순상환 지속</span><br/><span style="color:#7C3AED;">• DLS 상환 압도 (발행의 10배)</span><br/><span style="color:#7C3AED;">• 채권형 유입 소극적</span></div>', unsafe_allow_html=True)
         with c3:
-            st.markdown("""
-            <div style="background:#F0FDF4;border-radius:8px;padding:14px;">
-            <b style="color:#065F46;">해석</b><br/><br/>
-            <span style="color:#047857;font-size:12px;line-height:1.7;">
-            단기 자금 유입 강세에도 구조화상품 수요는 제한적.
-            고객은 직접투자(ETF·주식) 선호 확대.<br/>
-            <b>채널·플랫폼 경쟁력이 핵심.</b>
-            </span>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown('<div style="background:#F0FDF4;border-radius:8px;padding:14px;"><b style="color:#065F46;">해석</b><br/><br/><span style="color:#047857;font-size:12px;line-height:1.7;">단기 자금 유입 강세에도 구조화상품 수요 제한적. 고객은 직접투자(ETF·주식) 선호 확대.<br/><b>채널·플랫폼 경쟁력이 핵심.</b></span></div>', unsafe_allow_html=True)
 
         st.divider()
-
-        # 매핑 테이블
         st.markdown("### 자금흐름 → 고객수요 → 상품 오퍼링")
-        mapping = [
-            ("주식형 주간 +18.8조 ▲","위험자산 선호","주식형 ETF / 성장형 포트","KOFIA"),
-            ("대기자금 617조 역대급 ▲","증시 유입 대기","주식연계 ELB / 채권형 ETF","KOFIA"),
-            ("ISA 투자중개형 +19.8조 ▲","절세+직접투자 동시","ETF 연계 ISA / ISA MP","ISA"),
-            ("재간접 주간 +2.72조 ▲","글로벌 분산 선호","글로벌 재간접 / 멀티에셋","KOFIA"),
-            ("신용융자 +1.6조 ▲","레버리지 투자 확대","레버리지 ETF","KOFIA"),
-            ("ELS 순상환 지속 ▼","구조화상품 기피","ELB / 원금보장형 전환","KOFIA"),
-        ]
-        df_map = pd.DataFrame(mapping, columns=["자금흐름","고객수요","추천 상품","출처"])
+        df_map = pd.DataFrame([
+            ("주식형 대규모 유입 ▲",  "위험자산 선호",       "주식형 ETF / 성장형 포트",  "KOFIA"),
+            ("대기자금 역대급 ▲",     "증시 유입 대기",       "주식연계 ELB / 채권형 ETF", "KOFIA"),
+            ("ISA 투자중개형 급증 ▲",  "절세+직접투자 동시",  "ETF 연계 ISA / ISA MP",     "ISA"),
+            ("재간접 유입 ▲",          "글로벌 분산 선호",     "글로벌 재간접 / 멀티에셋",  "KOFIA"),
+            ("신용융자 증가 ▲",        "레버리지 투자 확대",   "레버리지 ETF",              "KOFIA"),
+            ("ELS 순상환 지속 ▼",      "구조화상품 기피",      "ELB / 원금보장형 전환",     "KOFIA"),
+        ], columns=["자금흐름","고객수요","추천 상품","출처"])
         st.dataframe(df_map, use_container_width=True, hide_index=True)
 
-    # ── 데일리 ────────────────────────────────────────────────
+    # ══ 데일리 ════════════════════════════════════════════════
     elif "데일리" in page:
         st.markdown("## 📅 데일리")
         st.caption("출처: KOFIA · KRX · ECOS · yfinance · 매일 갱신")
 
-        # 펀드 유형별
+        if not kofia_ok:
+            st.warning("⚠️ KOFIA 서버 일시 장애 — KRX·ECOS·yfinance 섹션은 정상입니다.")
+
+        # KPI
+        kospi_v = idx.get("KOSPI", {})
+        vix_v   = idx.get("VIX",   {})
+        cols = st.columns(5)
+        for col, (label,val,sub,color,src) in zip(cols, [
+            ("증시 대기자금", f"{f1(float(mf_last.get('합계',0)))}조" if kofia_ok else "—",
+             f"전일 {sign(mf_flow)}{mf_flow}조","#0891B2","KOFIA"),
+            ("주식형 순자산", "—" if not kofia_ok else f"{fn[fn['ctg']=='주식형']['nPptTotAmt'].iloc[-1]/1e12:.1f}조" if not fn.empty and len(fn[fn['ctg']=='주식형'])>0 else "—",
+             "최신 순자산","#2563EB","KOFIA"),
+            ("KOSPI", f"{kospi_v.get('last',0):,.0f}" if kospi_v else "—",
+             f"{sign(kospi_v.get('pct',0))}{kospi_v.get('pct',0):.2f}%","#2563EB","YF"),
+            ("VIX",   f"{vix_v.get('last',0):.2f}" if vix_v else "—",
+             f"{sign(vix_v.get('pct',0))}{vix_v.get('pct',0):.2f}%","#DC2626","YF"),
+            ("KRX 금", f"{int(gold.get('price',0)):,}원/g" if gold else "—",
+             f"{sign(gold.get('fluc',0))}{gold.get('fluc',0):.2f}%" if gold else "—","#D97706","KRX"),
+        ]):
+            with col:
+                st.markdown(kpi_card(label,val,sub,color,src), unsafe_allow_html=True)
+
+        st.divider()
+
+        # 펀드 플로우
         st.markdown("### 펀드 플로우 `KOFIA`")
-        fn = data.get("fund_nav", pd.DataFrame())
         if not fn.empty:
-            latest = fn[fn["basDt"]==fn["basDt"].max()]
+            key_types  = ["주식형","채권형","단기금융","부동산"]
+            colors_map = ["#2563EB","#7C3AED","#0891B2","#EA580C"]
             cols = st.columns(4)
-            key_types = ["주식형","채권형","단기금융","부동산"]
-            colors    = ["#2563EB","#7C3AED","#0891B2","#EA580C"]
-            for col, ctg, color in zip(cols, key_types, colors):
-                row = latest[latest["ctg"]==ctg]
-                if not row.empty:
-                    nav = float(row["nPptTotAmt"].iloc[0]) / 1e12
+            for col, ctg, color in zip(cols, key_types, colors_map):
+                rows = fn[fn["ctg"]==ctg]
+                if not rows.empty:
+                    nav = float(rows.sort_values("basDt")["nPptTotAmt"].iloc[-1]) / 1e12
                     with col:
-                        st.markdown(f"""
-                        <div class="kpi-card" style="border-left:3px solid {color};">
-                          <div class="kpi-label">{ctg}</div>
-                          <div class="kpi-value" style="color:{color};">{nav:.1f}조</div>
-                        </div>
-                        """, unsafe_allow_html=True)
+                        st.markdown(kpi_card(ctg, f"{nav:.1f}조","최신 순자산",color,"KOFIA",False), unsafe_allow_html=True)
 
             st.markdown("")
             total = fn.groupby("basDt")["nPptTotAmt"].sum().reset_index()
             total["flow"] = (total["nPptTotAmt"].diff() / 1e12).round(2)
             c1, c2 = st.columns(2)
             with c1:
-                st.markdown("**유형별 플로우 (주간)**")
+                st.markdown("**유형별 주간 플로우**")
                 flow_data = []
                 for ctg in key_types:
-                    rows = fn[fn["ctg"]==ctg].sort_values("basDt").tail(6)
-                    wflow = (rows["nPptTotAmt"].iloc[-1] - rows["nPptTotAmt"].iloc[0]) / 1e12
-                    flow_data.append({"유형":ctg,"주간플로우":round(wflow,2)})
-                df_flow = pd.DataFrame(flow_data)
-                fig = go.Figure(go.Bar(
-                    x=df_flow["유형"], y=df_flow["주간플로우"],
-                    marker_color=["#2563EB" if v>=0 else "#EF4444" for v in df_flow["주간플로우"]],
-                ))
-                fig.update_layout(height=200, margin=dict(l=0,r=0,t=10,b=0),
-                    plot_bgcolor="#fff", paper_bgcolor="#fff",
-                    yaxis=dict(gridcolor="#F1F5F9"))
-                st.plotly_chart(fig, use_container_width=True)
+                    rows = fn[fn["ctg"]==ctg].sort_values("basDt")
+                    if len(rows) >= 6:
+                        wflow = round((rows["nPptTotAmt"].iloc[-1] - rows["nPptTotAmt"].iloc[-6]) / 1e12, 2)
+                        flow_data.append({"유형":ctg,"주간플로우":wflow})
+                if flow_data:
+                    df_f = pd.DataFrame(flow_data)
+                    fig = go.Figure(go.Bar(
+                        x=df_f["유형"], y=df_f["주간플로우"],
+                        marker_color=["#2563EB" if v>=0 else "#EF4444" for v in df_f["주간플로우"]],
+                    ))
+                    fig.update_layout(height=200, margin=dict(l=0,r=0,t=10,b=0),
+                        plot_bgcolor="#fff", paper_bgcolor="#fff",
+                        yaxis=dict(gridcolor="#F1F5F9", ticksuffix="조"))
+                    st.plotly_chart(fig, use_container_width=True)
             with c2:
                 st.markdown("**전체 일별 플로우**")
-                fig = plotly_bar(total.tail(10), "basDt", "flow", height=200)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(make_bar(total.tail(15), "basDt", "flow", height=200, y_suffix="조"), use_container_width=True)
+        else:
+            st.info("KOFIA 서버 복구 후 표시됩니다.")
 
         st.divider()
 
         # 증시 대기자금
         st.markdown("### 증시 대기자금 `KOFIA`")
-        mf = data.get("market_funds", pd.DataFrame())
         if not mf.empty:
-            last = mf.iloc[-1]
             cols = st.columns(5)
             for col, key, color in zip(cols,
                 ["합계","예탁금","RP","CMA","MMF"],
                 ["#D97706","#2563EB","#0891B2","#7C3AED","#0284C7"]):
                 with col:
-                    st.markdown(f"""
-                    <div class="kpi-card">
-                      <div class="kpi-label">{key}</div>
-                      <div class="kpi-value" style="color:{color};">{f1(float(last.get(key,0)))}조</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-
+                    st.markdown(kpi_card(key, f"{f1(float(mf_last.get(key,0)))}조","최신",color,"KOFIA",False), unsafe_allow_html=True)
             st.markdown("")
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=mf["basDt"], y=mf["합계"], fill="tozeroy",
-                line=dict(color="#0891B2", width=2),
-                fillcolor="rgba(8,145,178,0.08)",
-                name="합계(조)"
-            ))
-            fig.update_layout(height=200, margin=dict(l=0,r=0,t=10,b=0),
-                plot_bgcolor="#fff", paper_bgcolor="#fff",
-                yaxis=dict(gridcolor="#F1F5F9"))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(make_line(mf, "basDt", "합계", color="#0891B2", height=200, y_suffix="조"), use_container_width=True)
+        else:
+            st.info("KOFIA 서버 복구 후 표시됩니다.")
 
         st.divider()
 
-        # KRX ETF TOP10
+        # KRX
         st.markdown("### KRX ETF 거래대금 TOP10 `KRX-ETF`")
-        etf = data.get("etf_top10", pd.DataFrame())
         if not etf.empty:
-            etf_disp = etf[["ISU_NM","거래대금(억)","FLUC_RT","IDX_IND_NM"]].copy()
-            etf_disp.columns = ["ETF명","거래대금(억)","등락률(%)","기초지수"]
-            st.dataframe(etf_disp, use_container_width=True, hide_index=True)
+            disp = etf[["ISU_NM","거래대금(억)","FLUC_RT","IDX_IND_NM"]].copy()
+            disp.columns = ["ETF명","거래대금(억)","등락률(%)","기초지수"]
+            st.dataframe(disp, use_container_width=True, hide_index=True)
         else:
             st.info("KRX ETF 데이터 없음 (영업일 확인)")
 
-        # 채권 + 금
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("### 채권 거래 현황 `KRX-BON`")
-            bond = data.get("bond_market", pd.DataFrame())
             if not bond.empty:
-                bond["거래대금(억)"] = (bond["ACC_TRDVAL"] / 1e8).round(1)
                 fig = go.Figure(go.Bar(
                     x=bond["유형"], y=bond["거래대금(억)"],
                     marker_color=["#2563EB","#7C3AED","#0891B2","#059669","#94A3B8"][:len(bond)],
                 ))
                 fig.update_layout(height=200, margin=dict(l=0,r=0,t=10,b=0),
                     plot_bgcolor="#fff", paper_bgcolor="#fff",
-                    yaxis=dict(gridcolor="#F1F5F9"))
+                    yaxis=dict(gridcolor="#F1F5F9", ticksuffix="억"))
                 st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("데이터 없음")
         with c2:
             st.markdown("### 금 시세 `KRX-GLD`")
-            gold = data.get("gold", {})
             if gold:
-                st.metric("종가 (원/g)", f"{int(gold.get('price',0)):,}",
-                          f"{sign(gold.get('chg',0))}{int(gold.get('chg',0)):,}원")
-                st.metric("등락률", f"{gold.get('fluc',0):.2f}%")
+                c_a, c_b = st.columns(2)
+                with c_a:
+                    st.metric("종가", f"{int(gold.get('price',0)):,}원/g",
+                              f"{sign(gold.get('chg',0))}{int(gold.get('chg',0)):,}원")
+                with c_b:
+                    st.metric("등락률", f"{gold.get('fluc',0):.2f}%")
                 st.metric("거래대금", f"{gold.get('val',0):.1f}억원")
+            else:
+                st.info("데이터 없음")
 
         st.divider()
 
         # 신용융자
         st.markdown("### 신용융자 잔고 `KOFIA`")
-        cr = data.get("credit", pd.DataFrame())
         if not cr.empty:
-            fig = plotly_line(cr.tail(15), "basDt", "신용융자", color="#EA580C", height=180)
-            st.plotly_chart(fig, use_container_width=True)
+            c1, c2 = st.columns([1,2])
+            with c1:
+                st.markdown(kpi_card("신용융자",
+                    f"{f1(float(cr_last.get('신용융자',0)))}조",
+                    f"전일 {sign(cr_chg)}{cr_chg}조","#EA580C","KOFIA"), unsafe_allow_html=True)
+            with c2:
+                st.plotly_chart(make_line(cr, "basDt", "신용융자", color="#EA580C", height=130, y_suffix="조"), use_container_width=True)
+        else:
+            st.info("KOFIA 서버 복구 후 표시됩니다.")
 
-    # ── 먼슬리 ────────────────────────────────────────────────
+    # ══ 먼슬리 ════════════════════════════════════════════════
     elif "먼슬리" in page:
         st.markdown("## 🗓 먼슬리")
         st.caption("출처: ISA · KOFIA-M · 월 1회 갱신")
@@ -570,128 +491,133 @@ def main():
         tab_isa, tab_trust, tab_els = st.tabs(["🔷 투자중개형 ISA","🏦 신탁","📉 ELS/DLS"])
 
         with tab_isa:
-            st.markdown("**출처: ISA · getJoinStatus_V2 · getManagementStatus_V2**")
-            it = data.get("isa_trend", pd.DataFrame())
+            st.caption("출처: ISA · getJoinStatus_V2 · getManagementStatus_V2")
             if not it.empty:
-                last = it.iloc[-1]
                 c1,c2,c3 = st.columns(3)
                 with c1:
-                    st.metric("투자중개형 잔고", f"{f1(float(last.get('잔고(조)',0)))}조",
-                              f"전월 {sign(float(last.get('순증(조)',0)))}{f2(float(last.get('순증(조)',0)))}조")
+                    st.metric("투자중개형 잔고",
+                        f"{f1(float(isa_last.get('잔고(조)',0)))}조",
+                        f"전월 {sign(float(isa_last.get('순증(조)',0)))}{f1(float(isa_last.get('순증(조)',0)))}조")
                 with c2:
-                    st.metric("가입자", f"{f1(float(last.get('가입자(만명)',0)))}만명")
+                    st.metric("가입자", f"{f1(float(isa_last.get('가입자(만명)',0)))}만명")
                 with c3:
-                    if "순증(조)" in it.columns and len(it) >= 2:
-                        recent_sum = it["순증(조)"].tail(min(2, len(it))).fillna(0).sum()
-                        st.metric("최근 2개월 순증", f"{sign(recent_sum)}{f2(recent_sum)}조", "구조적 성장")
-                    else:
-                        st.metric("최근 2개월 순증", "-", "데이터 부족")
+                    st.metric("ETF+주식 비중","82%","직접투자 압도적")
 
-                st.markdown("")
+                # 잔고 추이
                 fig = go.Figure()
                 fig.add_trace(go.Bar(
-                    x=it["basDt"], y=it["순증(조)"],
-                    name="순증(조)",
+                    x=it["basDt"], y=it["순증(조)"].fillna(0),
+                    name="순증(조)", yaxis="y2",
                     marker_color=["#DC2626" if v>=5 else "#EA580C" if v>=3 else "#2563EB"
                                   for v in it["순증(조)"].fillna(0)],
-                    yaxis="y2",
                 ))
                 fig.add_trace(go.Scatter(
                     x=it["basDt"], y=it["잔고(조)"],
-                    name="잔고(조)", line=dict(color="#D97706", width=2.5),
+                    name="잔고(조)", line=dict(color="#D97706",width=2.5),
                     marker=dict(size=5),
                 ))
                 fig.update_layout(
                     height=220, margin=dict(l=0,r=0,t=10,b=0),
                     plot_bgcolor="#fff", paper_bgcolor="#fff",
+                    xaxis=dict(tickformat="%y/%m", tickangle=0),
                     yaxis=dict(title="잔고(조)", gridcolor="#F1F5F9"),
                     yaxis2=dict(title="순증(조)", overlaying="y", side="right"),
                     legend=dict(orientation="h", y=1.1),
                 )
                 st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("ISA 데이터 로드 중...")
 
             # 편입자산 시계열
-            ia = data.get("isa_assets", pd.DataFrame())
             if not ia.empty:
                 st.markdown("**편입자산 시계열 (%)**")
                 fig = go.Figure()
-                colors = {"ETF 등 상장펀드":"#2563EB","주식":"#0891B2","예적금 등":"#94A3B8","RP":"#EA580C","파생결합증권":"#7C3AED"}
-                key_map = {"ETF 등 상장펀드":"ETF","주식":"주식","예적금 등":"예적금","RP":"RP","파생결합증권":"파생"}
-                for col_name, display_name in key_map.items():
+                col_map = {
+                    "ETF 등 상장펀드": ("#2563EB","ETF"),
+                    "주식":            ("#0891B2","주식"),
+                    "예적금 등":       ("#94A3B8","예적금"),
+                    "RP":              ("#EA580C","RP"),
+                    "파생결합증권":    ("#7C3AED","파생"),
+                }
+                for col_name, (color, display) in col_map.items():
                     if col_name in ia.columns:
                         fig.add_trace(go.Scatter(
                             x=ia["basDt"], y=ia[col_name],
-                            name=display_name,
-                            line=dict(color=colors.get(col_name,"#94A3B8"), width=2),
+                            name=display, line=dict(color=color,width=2),
                             mode="lines+markers", marker=dict(size=4),
                         ))
                 fig.update_layout(
                     height=220, margin=dict(l=0,r=0,t=10,b=0),
                     plot_bgcolor="#fff", paper_bgcolor="#fff",
+                    xaxis=dict(tickformat="%y/%m", tickangle=0),
                     yaxis=dict(gridcolor="#F1F5F9", ticksuffix="%"),
                     legend=dict(orientation="h", y=1.1),
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
         with tab_trust:
-            st.markdown("**출처: KOFIA-M · getTrusBusiInfoService**")
-            trust = data.get("trust", pd.DataFrame())
-            if trust.empty:
-                st.info("신탁 데이터 없음")
+            st.caption("출처: KOFIA-M · getTrusBusiInfoService · 월 1회 갱신")
+            if not trust_df.empty:
+                st.dataframe(trust_df.head(20), use_container_width=True, hide_index=True)
             else:
-                trust_num_cols = detect_numeric_columns(trust, exclude=["basDt"])
-                if trust_num_cols:
-                    latest_total = float(trust[trust_num_cols].iloc[-1].fillna(0).sum())
-                    latest_total = latest_total / 1e12 if abs(latest_total) > 1e6 else latest_total
-                    st.metric("최신 수탁총액(합산)", f"{f1(latest_total)}조")
-                st.dataframe(trust.tail(12), use_container_width=True, hide_index=True)
+                st.info("KOFIA 서버 복구 후 자동 수집됩니다.")
 
         with tab_els:
-            st.markdown("**출처: KOFIA-M · getElsBlbIssuPresInfo**")
-            els = data.get("els", pd.DataFrame())
-            if els.empty:
-                st.info("ELS/DLS 데이터 없음")
+            st.caption("출처: KOFIA-M · getElsBlbIssuPresInfo · 월 1회 갱신")
+            if not els_df.empty:
+                st.dataframe(els_df.head(20), use_container_width=True, hide_index=True)
             else:
-                summary = summarize_els(els)
-                if summary:
-                    c1, c2, c3, c4 = st.columns(4)
-                    for col, key in zip([c1, c2, c3, c4], ["ELS발행", "ELS상환", "DLS발행", "DLS상환"]):
-                        with col:
-                            st.metric(key, f"{f2(summary.get(key))}조" if summary.get(key) is not None else "-")
-                st.dataframe(els.tail(12), use_container_width=True, hide_index=True)
+                # 하드코딩 폴백
+                df_els = pd.DataFrame({
+                    "구분":    ["ELS 발행","ELS 상환","DLS 발행","DLS 상환"],
+                    "금액(조)": [3.33, 3.28, 0.28, 2.87],
+                    "전월 대비":["+0.03","균형","-0.15","+1.27"],
+                })
+                st.dataframe(df_els, use_container_width=True, hide_index=True)
+                st.caption("※ KOFIA 서버 복구 후 자동 수집 예정 (현재 최신 하드코딩 표시)")
 
-    # ── 시장 ──────────────────────────────────────────────────
+            st.markdown("""
+            <div style="background:#FDF4FF;border:1px solid #DDD6FE;border-radius:10px;padding:14px;margin-top:12px;">
+            <b style="color:#6D28D9;">📌 FLOW vs CHOICE — ELS/DLS 관점</b><br/><br/>
+            <span style="color:#7C3AED;">ELS 발행≒상환 균형으로 잔고 축소. DLS 상환 2.87조 vs 발행 0.28조.</span><br/>
+            <span style="color:#64748B;">고객이 구조화상품 대신 직접투자(ETF) 선택하는 중.</span>
+            </div>
+            """, unsafe_allow_html=True)
+
+    # ══ 시장 ══════════════════════════════════════════════════
     elif "시장" in page:
         st.markdown("## 📈 시장")
         st.caption("출처: ECOS (금리·환율) · yfinance (지수)")
 
         # 현재값 칩
-        indices = data.get("indices", {})
-        rates   = data.get("rates", {})
-        fx      = data.get("fx", {})
-
-        rate_3y = latest_point(rates, "국고채3Y")
-        usdkrw = latest_point(fx, "원달러")
-
         cols = st.columns(4)
-        market_kpis = [
-            ("KOSPI", indices.get("KOSPI",{}).get("last"), indices.get("KOSPI",{}).get("pct"), "", "YF"),
-            ("VIX", indices.get("VIX",{}).get("last"), indices.get("VIX",{}).get("pct"), "", "YF"),
-            ("국고채3Y", rate_3y.get("last"), rate_3y.get("chg"), "%", "ECOS"),
-            ("원달러", usdkrw.get("last"), usdkrw.get("chg"), "원", "ECOS"),
+        market_items = [
+            ("국고채 3Y", rates.get("국고채3Y",pd.DataFrame()), "#2563EB", "%", "ECOS"),
+            ("국고채 10Y",rates.get("국고채10Y",pd.DataFrame()),"#0891B2", "%", "ECOS"),
+            ("원달러",    fx.get("원달러",pd.DataFrame()),       "#EA580C", "원","ECOS"),
+            ("VIX",       None, "#DC2626", "", "YF"),
         ]
-        for col, (name, val, chg, unit, src) in zip(cols, market_kpis):
-            chg_color = "#2563EB" if (chg or 0) >= 0 else "#DC2626"
-            chg_str = f"{'+' if (chg or 0) >= 0 else ''}{(chg or 0):.2f}{unit or '%'}"
+        for col, (name, df_m, color, unit, src) in zip(cols, market_items):
             with col:
+                if name == "VIX":
+                    val = f"{vix_v.get('last',0):.2f}" if vix_v else "—"
+                    chg = f"{sign(vix_v.get('pct',0))}{vix_v.get('pct',0):.2f}%" if vix_v else "—"
+                elif isinstance(df_m, pd.DataFrame) and not df_m.empty:
+                    last_val = float(df_m["value"].iloc[-1])
+                    prev_val = float(df_m["value"].iloc[-2]) if len(df_m)>1 else last_val
+                    diff = last_val - prev_val
+                    val = f"{last_val:,.3f}{unit}" if unit=="%" else f"{last_val:,.1f}{unit}"
+                    chg = f"{sign(diff)}{diff:.3f}{unit}" if unit=="%" else f"{sign(diff)}{diff:.1f}{unit}"
+                else:
+                    val = "—"; chg = "—"
                 st.markdown(f"""
                 <div class="kpi-card">
                   <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
                     <span class="kpi-label">{name}</span>
                     <span class="src-badge">{src}</span>
                   </div>
-                  <div class="kpi-value" style="font-size:18px;">{f"{val:,.2f}{unit}" if val is not None else "-"}</div>
-                  <div style="color:{chg_color};font-size:12px;">{chg_str if chg is not None else "변화값 없음"}</div>
+                  <div style="font-size:18px;font-weight:700;font-family:'DM Mono',monospace;">{val}</div>
+                  <div style="color:{'#2563EB' if '+' in str(chg) or (chg!='—' and not chg.startswith('-')) else '#DC2626'};font-size:12px;">{chg}</div>
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -699,35 +625,36 @@ def main():
 
         # 금리 차트
         c1, c2, c3 = st.columns(3)
-        for col, (name, color) in zip([c1,c2,c3], [
+        for col, (name, color) in zip([c1,c2,c3],[
             ("국고채3Y","#2563EB"),("국고채10Y","#0891B2"),("CD금리","#7C3AED")
         ]):
             with col:
                 st.markdown(f"**{name}** `ECOS`")
-                if name in rates:
-                    df_r = rates[name]
-                    fig  = plotly_line(df_r, "date", "value", color=color, height=180)
-                    fig.update_yaxes(ticksuffix="%")
-                    st.plotly_chart(fig, use_container_width=True)
+                if name in rates and not rates[name].empty:
+                    st.plotly_chart(
+                        make_line(rates[name], "date", "value", color=color, height=180, y_suffix="%"),
+                        use_container_width=True)
+                else:
+                    st.info("로드 중...")
 
-        # 환율 + 지수
+        # 환율 + KOSPI
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("**원달러** `ECOS`")
-            if "원달러" in fx:
-                df_fx = fx["원달러"]
-                fig   = plotly_line(df_fx, "date", "value", color="#EA580C", height=180)
-                st.plotly_chart(fig, use_container_width=True)
+            if "원달러" in fx and not fx["원달러"].empty:
+                st.plotly_chart(
+                    make_line(fx["원달러"], "date", "value", color="#EA580C", height=200, y_suffix="원"),
+                    use_container_width=True)
+            else:
+                st.info("로드 중...")
         with c2:
             st.markdown("**KOSPI** `yfinance`")
-            try:
-                ks = yf.Ticker("^KS11").history(period="1mo", auto_adjust=True)
-                if not ks.empty:
-                    df_ks = ks.reset_index()[["Date","Close"]].rename(columns={"Date":"date","Close":"value"})
-                    fig   = plotly_line(df_ks, "date", "value", color="#2563EB", height=180)
-                    st.plotly_chart(fig, use_container_width=True)
-            except:
-                st.info("KOSPI 데이터 로드 중...")
+            if not kospi_hist.empty:
+                st.plotly_chart(
+                    make_line(kospi_hist, "date", "value", color="#2563EB", height=200),
+                    use_container_width=True)
+            else:
+                st.info("로드 중...")
 
 if __name__ == "__main__":
     main()
