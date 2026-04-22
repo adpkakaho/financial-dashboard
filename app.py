@@ -68,8 +68,8 @@ try:
     KRX_KEY   = st.secrets["KRX_KEY"]
 except Exception:
     # 로컬 테스트용
-    KOFIA_KEY = "91e172c276e0398e491830b951a61417954f4cc3de8ec207fd5af1ce51c3f5c5"
-    KRX_KEY   = "70D25110E208480C993E9DFE4847613BE5276662"
+    KOFIA_KEY = ""
+    KRX_KEY   = ""
 
 # ══════════════════════════════════════════════════════════════
 # 데이터 수집 (24시간 캐시)
