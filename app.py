@@ -589,6 +589,10 @@ def main():
         st.markdown("## 📈 시장")
         st.caption("출처: ECOS (금리·환율) · yfinance (지수)")
 
+        # 시장 탭 전용 변수 (다른 탭과 독립)
+        vix_m   = idx.get("VIX",   {})
+        kospi_m = idx.get("KOSPI", {})
+
         # 현재값 칩
         cols = st.columns(4)
         market_items = [
@@ -600,8 +604,8 @@ def main():
         for col, (name, df_m, color, unit, src) in zip(cols, market_items):
             with col:
                 if name == "VIX":
-                    val = f"{vix_v.get('last',0):.2f}" if vix_v else "—"
-                    chg = f"{sign(vix_v.get('pct',0))}{vix_v.get('pct',0):.2f}%" if vix_v else "—"
+                    val = f"{vix_m.get('last',0):.2f}" if vix_m else "—"
+                    chg = f"{sign(vix_m.get('pct',0))}{vix_m.get('pct',0):.2f}%" if vix_m else "—"
                 elif isinstance(df_m, pd.DataFrame) and not df_m.empty:
                     last_val = float(df_m["value"].iloc[-1])
                     prev_val = float(df_m["value"].iloc[-2]) if len(df_m)>1 else last_val
