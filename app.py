@@ -66,17 +66,18 @@ st.markdown("""
 try:
     KOFIA_KEY = st.secrets["KOFIA_KEY"]
     KRX_KEY   = st.secrets["KRX_KEY"]
+    ECOS_KEY  = st.secrets["ECOS_KEY"]
 except Exception:
-    # 로컬 테스트용
     KOFIA_KEY = ""
     KRX_KEY   = ""
+    ECOS_KEY  = ""
 
 # ══════════════════════════════════════════════════════════════
 # 데이터 수집 (24시간 캐시)
 # ══════════════════════════════════════════════════════════════
 @st.cache_data(ttl=86400, show_spinner="📡 데이터 수집 중...")
 def load_data():
-    return collect_all(KOFIA_KEY, KRX_KEY)
+    return collect_all(KOFIA_KEY, KRX_KEY, ECOS_KEY)
 
 # ── 헬퍼 ─────────────────────────────────────────────────────
 def sign(v): return "+" if v > 0 else ""

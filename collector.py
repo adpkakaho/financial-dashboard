@@ -22,6 +22,7 @@ import time
 # st.secrets["KOFIA_KEY"] / os.environ["KOFIA_KEY"]
 KOFIA_KEY = ""   # 공공데이터포털 인증키
 KRX_KEY   = ""   # KRX Open API 인증키
+ECOS_KEY  = ""   # 한국은행 ECOS 인증키
 
 BASE_KOFIA = "https://apis.data.go.kr/1160100/GetKofiaStatisticsInfoService"
 BASE_ISA   = "https://apis.data.go.kr/1160100/GetISAInfoService_V2"
@@ -91,7 +92,7 @@ def _ecos_get(stat_code, item_code, freq="D", days_back=30):
     """한국은행 ECOS API 호출"""
     end_dt   = datetime.today().strftime("%Y%m%d")
     start_dt = (datetime.today() - timedelta(days=days_back)).strftime("%Y%m%d")
-    url = f"{BASE_ECOS}/{KOFIA_KEY}/json/kr/1/100/{stat_code}/{freq}/{start_dt}/{end_dt}/{item_code}"
+    url = f"{BASE_ECOS}/{ECOS_KEY}/json/kr/1/100/{stat_code}/{freq}/{start_dt}/{end_dt}/{item_code}"
     try:
         r    = requests.get(url, timeout=15)
         data = r.json().get("StatisticSearch", {}).get("row", [])
@@ -415,14 +416,15 @@ def get_isa_assets():
 # 전체 수집 (메인 함수)
 # ══════════════════════════════════════════════════════════════
 
-def collect_all(kofia_key: str, krx_key: str) -> dict:
+def collect_all(kofia_key: str, krx_key: str, ecos_key: str) -> dict:
     """
     모든 데이터 수집 후 딕셔너리 반환
     Streamlit app.py에서 호출
     """
-    global KOFIA_KEY, KRX_KEY
+    global KOFIA_KEY, KRX_KEY, ECOS_KEY
     KOFIA_KEY = kofia_key
     KRX_KEY   = krx_key
+    ECOS_KEY  = ecos_key
 
     print("📡 데이터 수집 시작...")
     data = {}
