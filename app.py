@@ -14,6 +14,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime
 import json
+import yfinance as yf
 
 from collector import collect_all
 
@@ -86,6 +87,63 @@ def f2(v):   return f"{v:.2f}" if v is not None else "-"
 def badge(src, color="#94A3B8"):
     return f'<span class="src-badge">{src}</span>'
 
+def latest_row(df):
+    return df.iloc[-1] if isinstance(df, pd.DataFrame) and not df.empty else pd.Series(dtype="object")
+
+def prev_row(df):
+    return df.iloc[-2] if isinstance(df, pd.DataFrame) and len(df) > 1 else pd.Series(dtype="object")
+
+def row_val(row, key, default=0.0):
+    try:
+        val = row.get(key, default)
+        if pd.isna(val):
+            return default
+        return float(val)
+    except Exception:
+        return default
+
+def latest_change(df, key):
+    if not isinstance(df, pd.DataFrame) or df.empty or key not in df.columns or len(df) < 2:
+        return None
+    try:
+        return round(float(df[key].iloc[-1]) - float(df[key].iloc[-2]), 2)
+    except Exception:
+        return None
+
+def latest_point(series_dict, key):
+    df = series_dict.get(key, pd.DataFrame()) if isinstance(series_dict, dict) else pd.DataFrame()
+    if isinstance(df, pd.DataFrame) and not df.empty and "value" in df.columns:
+        last = float(df["value"].iloc[-1])
+        prev = float(df["value"].iloc[-2]) if len(df) > 1 else last
+        return {"last": last, "chg": last - prev, "pct": ((last-prev)/prev*100) if prev else 0.0}
+    return {"last": None, "chg": None, "pct": None}
+
+def detect_numeric_columns(df, exclude=None):
+    exclude = set(exclude or [])
+    return [c for c in df.columns if c not in exclude and pd.api.types.is_numeric_dtype(df[c])]
+
+def summarize_els(df):
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return {}
+    row = df.iloc[-1]
+    summary = {}
+    for col in df.columns:
+        col_s = str(col)
+        if col_s == "basDt" or not pd.api.types.is_numeric_dtype(df[col]):
+            continue
+        label = None
+        if "ELS" in col_s and any(k in col_s for k in ["발행", "issu", "Issu"]):
+            label = "ELS발행"
+        elif "ELS" in col_s and any(k in col_s for k in ["상환", "rede", "Rede"]):
+            label = "ELS상환"
+        elif "DLS" in col_s and any(k in col_s for k in ["발행", "issu", "Issu"]):
+            label = "DLS발행"
+        elif "DLS" in col_s and any(k in col_s for k in ["상환", "rede", "Rede"]):
+            label = "DLS상환"
+        if label:
+            summary[label] = float(row[col]) / 1e12 if abs(float(row[col])) > 1e6 else float(row[col])
+    return summary
+
 def plotly_line(df, x, y, color="#2563EB", title="", height=200):
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -157,25 +215,55 @@ def main():
         cr = data.get("credit", pd.DataFrame())
         it = data.get("isa_trend", pd.DataFrame())
 
-        mf_last  = mf.iloc[-1]  if not mf.empty else {}
-        mf_prev  = mf.iloc[-2]  if len(mf) > 1 else {}
-        cr_last  = cr.iloc[-1]  if not cr.empty else {}
-        cr_prev  = cr.iloc[-2]  if len(cr) > 1 else {}
-        isa_last = it.iloc[-1]  if not it.empty else {}
+        mf_last = latest_row(mf)
+        cr_last = latest_row(cr)
+        isa_last = latest_row(it)
+        trust_df = data.get("trust", pd.DataFrame())
+        trust_last = latest_row(trust_df)
+        els_df = data.get("els", pd.DataFrame())
+        els_summary = summarize_els(els_df)
 
-        mf_flow = round(float(mf_last.get("합계",0)) - float(mf_prev.get("합계",0)), 1) if mf_prev else 0
+        mf_flow = latest_change(mf, "합계")
+        cr_flow = latest_change(cr, "신용융자")
+        isa_flow = latest_change(it, "잔고(조)")
+
+        fn = data.get("fund_nav", pd.DataFrame())
+        fund_total = None
+        fund_total = None
+        if not fn.empty and {"basDt", "nPptTotAmt"}.issubset(fn.columns):
+            total_by_day = fn.groupby("basDt")["nPptTotAmt"].sum().sort_index() / 1e12
+            if not total_by_day.empty:
+                fund_total = float(total_by_day.iloc[-1])
+                fund_total_flow = round(float(total_by_day.iloc[-1] - total_by_day.iloc[-2]), 1) if len(total_by_day) > 1 else None
+            else:
+                fund_total_flow = None
+        else:
+            fund_total_flow = None
+
+        trust_value = None
+        if not trust_df.empty:
+            trust_num_cols = detect_numeric_columns(trust_df, exclude=["basDt"])
+            if trust_num_cols:
+                raw_val = float(trust_df[trust_num_cols].iloc[-1].fillna(0).sum())
+                trust_value = raw_val / 1e12 if abs(raw_val) > 1e6 else raw_val
+
+        els_net = None
+        if els_summary:
+            els_net = round((els_summary.get("ELS발행", 0) + els_summary.get("DLS발행", 0)) - (els_summary.get("ELS상환", 0) + els_summary.get("DLS상환", 0)), 2)
 
         # KPI 6개
         cols = st.columns(6)
         kpis = [
-            ("펀드 순자산",   "3,216조", f"전일 +6.9조",  "#2563EB", "DAY", "KOFIA"),
-            ("증시 대기자금", f"{f1(float(mf_last.get('합계',617.9)))}조",
-                             f"전일 {sign(mf_flow)}{mf_flow}조", "#0891B2", "DAY", "KOFIA"),
-            ("신용융자",      f"{f1(float(cr_last.get('신용융자',34.3)))}조",
-                             "전일 +0.23조", "#EA580C", "DAY", "KOFIA"),
-            ("ISA 투자중개형","83.4조", "전월 +8.1조",    "#D97706", "MON", "ISA"),
-            ("신탁 수탁총액", "873조",  "전월 증가",       "#0891B2", "MON", "KOFIA"),
-            ("ELS 순발행",   "-0.05조", "발행≒상환",      "#7C3AED", "MON", "KOFIA"),
+            ("펀드 순자산", f"{f1(fund_total)}조" if fund_total is not None else "-",
+             f"전일 {sign(fund_total_flow)}{f1(fund_total_flow)}조" if fund_total_flow is not None else "전일 비교 없음", "#2563EB", "DAY", "KOFIA"),
+            ("증시 대기자금", f"{f1(row_val(mf_last, '합계', 0))}조" if not mf.empty else "-",
+             f"전일 {sign(mf_flow)}{f1(mf_flow)}조" if mf_flow is not None else "전일 비교 없음", "#0891B2", "DAY", "KOFIA"),
+            ("신용융자", f"{f1(row_val(cr_last, '신용융자', 0))}조" if not cr.empty else "-",
+             f"전일 {sign(cr_flow)}{f2(cr_flow)}조" if cr_flow is not None else "전일 비교 없음", "#EA580C", "DAY", "KOFIA"),
+            ("ISA 투자중개형", f"{f1(row_val(isa_last, '잔고(조)', 0))}조" if not it.empty else "-",
+             f"전월 {sign(isa_flow)}{f2(isa_flow)}조" if isa_flow is not None else "전월 비교 없음", "#D97706", "MON", "ISA"),
+            ("신탁 수탁총액", f"{f1(trust_value)}조" if trust_value is not None else "-", "최신 월 데이터", "#0891B2", "MON", "KOFIA"),
+            ("ELS 순발행", f"{f2(els_net)}조" if els_net is not None else "-", "발행-상환 기준", "#7C3AED", "MON", "KOFIA"),
         ]
         for col, (label, val, sub, color, freq, src) in zip(cols, kpis):
             freq_color = "#EFF6FF" if freq=="DAY" else "#FFFBEB"
@@ -493,7 +581,11 @@ def main():
                 with c2:
                     st.metric("가입자", f"{f1(float(last.get('가입자(만명)',0)))}만명")
                 with c3:
-                    st.metric("26년 2개월 순증", "+19.8조", "구조적 성장")
+                    if "순증(조)" in it.columns and len(it) >= 2:
+                        recent_sum = it["순증(조)"].tail(min(2, len(it))).fillna(0).sum()
+                        st.metric("최근 2개월 순증", f"{sign(recent_sum)}{f2(recent_sum)}조", "구조적 성장")
+                    else:
+                        st.metric("최근 2개월 순증", "-", "데이터 부족")
 
                 st.markdown("")
                 fig = go.Figure()
@@ -542,26 +634,31 @@ def main():
                 st.plotly_chart(fig, use_container_width=True)
 
         with tab_trust:
-            st.markdown("**출처: KOFIA-M · getTrusBusiInfoService · 최신 2026.03**")
-            st.info("신탁 데이터는 월별로 API에서 자동 수집됩니다.")
+            st.markdown("**출처: KOFIA-M · getTrusBusiInfoService**")
+            trust = data.get("trust", pd.DataFrame())
+            if trust.empty:
+                st.info("신탁 데이터 없음")
+            else:
+                trust_num_cols = detect_numeric_columns(trust, exclude=["basDt"])
+                if trust_num_cols:
+                    latest_total = float(trust[trust_num_cols].iloc[-1].fillna(0).sum())
+                    latest_total = latest_total / 1e12 if abs(latest_total) > 1e6 else latest_total
+                    st.metric("최신 수탁총액(합산)", f"{f1(latest_total)}조")
+                st.dataframe(trust.tail(12), use_container_width=True, hide_index=True)
 
         with tab_els:
-            st.markdown("**출처: KOFIA-M · getElsBlbIssuPresInfo · 최신 2026.02**")
-            # 하드코딩 데이터 표시 (월별 갱신)
-            els_data = {
-                "구분": ["ELS 발행","ELS 상환","DLS 발행","DLS 상환"],
-                "금액(조)": [3.33, 3.28, 0.28, 2.87],
-                "전월 대비": ["+0.03","균형","-0.15","+1.27"],
-            }
-            st.dataframe(pd.DataFrame(els_data), use_container_width=True, hide_index=True)
-
-            st.markdown("""
-            <div style="background:#FDF4FF;border:1px solid #DDD6FE;border-radius:10px;padding:14px;">
-            <b style="color:#6D28D9;">📌 FLOW vs CHOICE — ELS/DLS 관점</b><br/><br/>
-            <span style="color:#7C3AED;">ELS 발행=상환 균형으로 잔고 축소. DLS 상환 2.87조 vs 발행 0.28조.</span><br/>
-            <span style="color:#64748B;">고객이 구조화상품 대신 직접투자(ETF) 선택하는 중.</span>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown("**출처: KOFIA-M · getElsBlbIssuPresInfo**")
+            els = data.get("els", pd.DataFrame())
+            if els.empty:
+                st.info("ELS/DLS 데이터 없음")
+            else:
+                summary = summarize_els(els)
+                if summary:
+                    c1, c2, c3, c4 = st.columns(4)
+                    for col, key in zip([c1, c2, c3, c4], ["ELS발행", "ELS상환", "DLS발행", "DLS상환"]):
+                        with col:
+                            st.metric(key, f"{f2(summary.get(key))}조" if summary.get(key) is not None else "-")
+                st.dataframe(els.tail(12), use_container_width=True, hide_index=True)
 
     # ── 시장 ──────────────────────────────────────────────────
     elif "시장" in page:
@@ -573,16 +670,19 @@ def main():
         rates   = data.get("rates", {})
         fx      = data.get("fx", {})
 
+        rate_3y = latest_point(rates, "국고채3Y")
+        usdkrw = latest_point(fx, "원달러")
+
         cols = st.columns(4)
         market_kpis = [
-            ("KOSPI", indices.get("KOSPI",{}).get("last",6388), indices.get("KOSPI",{}).get("pct",2.72), "", "YF"),
-            ("VIX",   indices.get("VIX",{}).get("last",19.5),  indices.get("VIX",{}).get("pct",3.34),   "", "YF"),
-            ("국고채3Y", 3.330, -0.018, "%", "ECOS"),
-            ("원달러",   1470.8, -4.80,  "원", "ECOS"),
+            ("KOSPI", indices.get("KOSPI",{}).get("last"), indices.get("KOSPI",{}).get("pct"), "", "YF"),
+            ("VIX", indices.get("VIX",{}).get("last"), indices.get("VIX",{}).get("pct"), "", "YF"),
+            ("국고채3Y", rate_3y.get("last"), rate_3y.get("chg"), "%", "ECOS"),
+            ("원달러", usdkrw.get("last"), usdkrw.get("chg"), "원", "ECOS"),
         ]
         for col, (name, val, chg, unit, src) in zip(cols, market_kpis):
-            chg_color = "#2563EB" if chg >= 0 else "#DC2626"
-            chg_str   = f"{'+' if chg>=0 else ''}{chg:.2f}{unit or '%'}"
+            chg_color = "#2563EB" if (chg or 0) >= 0 else "#DC2626"
+            chg_str = f"{'+' if (chg or 0) >= 0 else ''}{(chg or 0):.2f}{unit or '%'}"
             with col:
                 st.markdown(f"""
                 <div class="kpi-card">
@@ -590,8 +690,8 @@ def main():
                     <span class="kpi-label">{name}</span>
                     <span class="src-badge">{src}</span>
                   </div>
-                  <div class="kpi-value" style="font-size:18px;">{val:,.2f}{unit}</div>
-                  <div style="color:{chg_color};font-size:12px;">{chg_str}</div>
+                  <div class="kpi-value" style="font-size:18px;">{f"{val:,.2f}{unit}" if val is not None else "-"}</div>
+                  <div style="color:{chg_color};font-size:12px;">{chg_str if chg is not None else "변화값 없음"}</div>
                 </div>
                 """, unsafe_allow_html=True)
 
