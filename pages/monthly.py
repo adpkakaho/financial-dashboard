@@ -65,10 +65,11 @@ def _trust_charts(trust_df: pd.DataFrame):
                 marker=dict(size=5),
                 hovertemplate=f"{short}: %{{y:.1f}}조<extra></extra>",
             ))
+        # x축: dtick 없이 데이터 범위 자동 맞춤 (데이터 없는 월 빈칸 방지)
         fig_line.update_layout(
             height=260, margin=dict(l=0, r=0, t=10, b=0),
             plot_bgcolor=_WHITE, paper_bgcolor=_WHITE,
-            xaxis=dict(tickformat="%y/%m", gridcolor=_GRID, dtick="M1"),
+            xaxis=dict(tickformat="%y/%m", gridcolor=_GRID),
             yaxis=dict(gridcolor=_GRID, ticksuffix="조"),
             hovermode="x unified",
             legend=dict(orientation="h", y=1.15, font=dict(size=10)),
@@ -167,11 +168,12 @@ def _els_dls_charts(els_df: pd.DataFrame, dls_df: pd.DataFrame):
             marker_color=color_map.get((str(tp), str(pres)), "#94A3B8"),
             hovertemplate=f"{tp} {label_map.get(pres,'')}: %{{y:.2f}}조<extra></extra>",
         ))
+    # x축: dtick 없이 실제 데이터 월만 표시 (API 제공 범위 자동 반영)
     fig_bar.update_layout(
         barmode="group", height=260,
         margin=dict(l=0, r=0, t=10, b=0),
         plot_bgcolor=_WHITE, paper_bgcolor=_WHITE,
-        xaxis=dict(tickformat="%y/%m", gridcolor=_GRID, dtick="M1"),
+        xaxis=dict(tickformat="%y/%m", gridcolor=_GRID, type="category"),
         yaxis=dict(gridcolor=_GRID, ticksuffix="조"),
         legend=dict(orientation="h", y=1.1),
         hovermode="x unified",
