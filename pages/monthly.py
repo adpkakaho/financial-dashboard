@@ -47,8 +47,8 @@ def _trust_charts(trust_df: pd.DataFrame):
         pivot_ctg = (df_total.groupby([date_col, ctg_col])["val"].sum()
                              .reset_index().sort_values(date_col))
 
-        # 최근 6개월만 표시
-        cutoff_6m = pivot_ctg[date_col].max() - pd.DateOffset(months=6)
+        # 최근 6개월만 표시 (max 포함 6개 → DateOffset(months=5) + >= 사용)
+        cutoff_6m = pivot_ctg[date_col].max() - pd.DateOffset(months=5)
         pivot_ctg = pivot_ctg[pivot_ctg[date_col] >= cutoff_6m]
 
         # 주요 상품 6개만 (금액 큰 순)
