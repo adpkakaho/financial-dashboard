@@ -165,30 +165,47 @@ def get_fund_nav(keys: ApiKeys) -> pd.DataFrame:
 
 def get_market_funds(keys: ApiKeys) -> pd.DataFrame:
     """[KOFIA-D] 증시 대기자금 합산 — 날짜 gap 보간 처리"""
-    df_dep  = _kofia_get(keys, "getSecuritiesMarketTotalCapitalInfo")
+    # 예탁금/RP: 두 엔드포인트 모두 시도 (API 명세 변경 대응)
+    df_dep = _kofia_get(keys, "getSecuritiesMarketTotalCapitalInfo")
+    if df_dep.empty:
+        df_dep = _kofia_get(keys, "getInvstorDeposit")  # 대체 엔드포인트
+
     df_cma  = _kofia_get(keys, "getCMAStatus")
+    if df_cma.empty:
+        df_cma = _kofia_get(keys, "getCmaBal")          # 대체 엔드포인트
+
     df_fund = get_fund_nav(keys)
     result: dict = {}
 
     if not df_dep.empty:
-        for col in ["invrDpsgAmt", "toCstRpchCndBndSlgBal"]:
-            df_dep[col] = pd.to_numeric(df_dep[col], errors="coerce")
-        df_dep["basDt"] = pd.to_datetime(df_dep["basDt"], format="%Y%m%d", errors="coerce")
-        for _, row in df_dep.iterrows():
-            dt = row["basDt"]
-            result.setdefault(dt, {})
-            result[dt]["예탁금"] = round(row["invrDpsgAmt"] / 1e12, 1)
-            result[dt]["RP"]    = round(row["toCstRpchCndBndSlgBal"] / 1e12, 1)
+        # 컬럼명 유연 탐지 (API 버전별 컬럼명 차이 대응)
+        dep_col = next((c for c in ["invrDpsgAmt", "invstDpsgAmt", "dpsgAmt"] if c in df_dep.columns), None)
+        rp_col  = next((c for c in ["toCstRpchCndBndSlgBal", "rpBal", "rpSlgBal"] if c in df_dep.columns), None)
+        dt_col  = next((c for c in ["basDt", "basDt", "baseDate"] if c in df_dep.columns), None)
+        if dep_col and dt_col:
+            df_dep[dep_col] = pd.to_numeric(df_dep[dep_col], errors="coerce")
+            df_dep[dt_col]  = pd.to_datetime(df_dep[dt_col], format="%Y%m%d", errors="coerce")
+            if rp_col:
+                df_dep[rp_col] = pd.to_numeric(df_dep[rp_col], errors="coerce")
+            for _, row in df_dep.iterrows():
+                dt = row[dt_col]
+                result.setdefault(dt, {})
+                result[dt]["예탁금"] = round(to_float(row[dep_col]) / 1e12, 1)
+                result[dt]["RP"]    = round(to_float(row[rp_col]) / 1e12, 1) if rp_col else 0
 
     if not df_cma.empty:
-        df_cma["actBal"] = pd.to_numeric(df_cma["actBal"], errors="coerce")
-        df_cma["basDt"]  = pd.to_datetime(df_cma["basDt"], format="%Y%m%d", errors="coerce")
-        if "mngInvTgt" in df_cma.columns:
-            df_cma = df_cma[df_cma["mngInvTgt"] == "합계"]
-        cma_daily = df_cma.groupby("basDt")["actBal"].sum()
-        for dt, val in cma_daily.items():
-            result.setdefault(dt, {})
-            result[dt]["CMA"] = round(val / 1e12, 1)
+        bal_col = next((c for c in ["actBal", "cmaBal", "bal"] if c in df_cma.columns), None)
+        dt_col  = next((c for c in ["basDt", "basDt", "baseDate"] if c in df_cma.columns), None)
+        tgt_col = next((c for c in ["mngInvTgt", "invTgt"] if c in df_cma.columns), None)
+        if bal_col and dt_col:
+            df_cma[bal_col] = pd.to_numeric(df_cma[bal_col], errors="coerce")
+            df_cma[dt_col]  = pd.to_datetime(df_cma[dt_col], format="%Y%m%d", errors="coerce")
+            if tgt_col:
+                df_cma = df_cma[df_cma[tgt_col] == "합계"]
+            cma_daily = df_cma.groupby(dt_col)[bal_col].sum()
+            for dt, val in cma_daily.items():
+                result.setdefault(dt, {})
+                result[dt]["CMA"] = round(val / 1e12, 1)
 
     if not df_fund.empty:
         mmf = df_fund[df_fund["ctg"] == "단기금융"].groupby("basDt")["nPptTotAmt"].sum()
@@ -325,10 +342,28 @@ def get_etf_top10(keys: ApiKeys) -> pd.DataFrame:
     return top10
 
 
-def get_bond_market(keys: ApiKeys) -> pd.DataFrame:
-    """[KRX-BON] 채권 거래 유형별 집계 — 최대 3일 소급"""
-    df = pd.DataFrame()
+def _krx_range(keys: ApiKeys, endpoint: str, days_back: int = 30) -> pd.DataFrame:
+    """KRX API를 days_back 일치 반복 호출해 시계열 DataFrame 반환"""
     from datetime import datetime, timedelta
+    frames = []
+    end = datetime.strptime(last_bizday(), "%Y%m%d")
+    start = end - timedelta(days=days_back)
+    cur = start
+    while cur <= end:
+        if cur.weekday() < 5:
+            df = _krx_post(keys, endpoint, cur.strftime("%Y%m%d"))
+            if not df.empty:
+                df["_date"] = cur
+                frames.append(df)
+            time.sleep(0.05)
+        cur += timedelta(days=1)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def get_bond_market(keys: ApiKeys) -> pd.DataFrame:
+    """[KRX-BON] 채권 거래 유형별 집계 — 당일 스냅샷 (최대 3일 소급)"""
+    from datetime import datetime, timedelta
+    df = pd.DataFrame()
     d = datetime.strptime(last_bizday(), "%Y%m%d")
     for _ in range(3):
         df = _krx_post(keys, "bon/bnd_bydd_trd", d.strftime("%Y%m%d"))
@@ -337,7 +372,6 @@ def get_bond_market(keys: ApiKeys) -> pd.DataFrame:
         d -= timedelta(days=1)
         while d.weekday() >= 5:
             d -= timedelta(days=1)
-
     if df.empty:
         return df
     df["ACC_TRDVAL"] = pd.to_numeric(df.get("ACC_TRDVAL", pd.Series(dtype=float)), errors="coerce")
@@ -348,10 +382,23 @@ def get_bond_market(keys: ApiKeys) -> pd.DataFrame:
     return result
 
 
+def get_bond_history(keys: ApiKeys, days_back: int = 30) -> pd.DataFrame:
+    """[KRX-BON] 채권 유형별 거래대금 시계열"""
+    df_all = _krx_range(keys, "bon/bnd_bydd_trd", days_back)
+    if df_all.empty:
+        return pd.DataFrame()
+    df_all["ACC_TRDVAL"] = pd.to_numeric(df_all.get("ACC_TRDVAL", pd.Series(dtype=float)), errors="coerce")
+    df_all["유형"] = df_all["ISU_NM"].apply(_classify_bond)
+    result = (df_all.groupby(["_date", "유형"])["ACC_TRDVAL"].sum()
+                    .reset_index().rename(columns={"_date": "date"}))
+    result["거래대금(억)"] = (result["ACC_TRDVAL"] / 1e8).round(1)
+    return result.sort_values("date")
+
+
 def get_gold(keys: ApiKeys) -> dict:
     """[KRX-GLD] 금 현물 시세 — 최대 3일 소급"""
-    df = pd.DataFrame()
     from datetime import datetime, timedelta
+    df = pd.DataFrame()
     d = datetime.strptime(last_bizday(), "%Y%m%d")
     for _ in range(3):
         df = _krx_post(keys, "gen/gold_bydd_trd", d.strftime("%Y%m%d"))
@@ -360,10 +407,8 @@ def get_gold(keys: ApiKeys) -> dict:
         d -= timedelta(days=1)
         while d.weekday() >= 5:
             d -= timedelta(days=1)
-
     if df.empty:
         return {}
-
     row = df[df["ISU_CD"] == "04020000"] if "ISU_CD" in df.columns else pd.DataFrame()
     if row.empty:
         row = df.iloc[[0]]
@@ -374,6 +419,26 @@ def get_gold(keys: ApiKeys) -> dict:
         "fluc":  to_float(row.get("FLUC_RT", 0)),
         "val":   round(to_float(row.get("ACC_TRDVAL", 0)) / 1e8, 1),
     }
+
+
+def get_gold_history(keys: ApiKeys, days_back: int = 30) -> pd.DataFrame:
+    """[KRX-GLD] 금 시세 시계열"""
+    df_all = _krx_range(keys, "gen/gold_bydd_trd", days_back)
+    if df_all.empty:
+        return pd.DataFrame()
+    target = df_all[df_all["ISU_CD"] == "04020000"] if "ISU_CD" in df_all.columns else df_all
+    if target.empty:
+        target = df_all
+    rows = []
+    for date, grp in target.groupby("_date"):
+        row = grp.iloc[0]
+        rows.append({
+            "date":  date,
+            "price": to_float(row.get("TDD_CLSPRC", 0)),
+            "fluc":  to_float(row.get("FLUC_RT", 0)),
+            "val":   round(to_float(row.get("ACC_TRDVAL", 0)) / 1e8, 1),
+        })
+    return pd.DataFrame(rows).sort_values("date")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -464,7 +529,9 @@ def collect_all(kofia_key: str, krx_key: str, ecos_key: str) -> dict:
         ("kospi_history", "KOSPI 시계열 (yfinance)",  lambda: get_kospi_history()),
         ("etf_top10",     "KRX ETF TOP10",            lambda: get_etf_top10(keys)),
         ("bond_market",   "KRX 채권",                 lambda: get_bond_market(keys)),
+        ("bond_history",  "KRX 채권 시계열",             lambda: get_bond_history(keys)),
         ("gold",          "KRX 금",                   lambda: get_gold(keys)),
+        ("gold_history",  "KRX 금 시계열",               lambda: get_gold_history(keys)),
         ("isa_trend",     "ISA 잔고 추이",             lambda: get_isa_trend(keys)),
         ("isa_assets",    "ISA 편입자산",              lambda: get_isa_assets(keys)),
         ("trust",         "신탁",                     lambda: get_trust(keys)),
