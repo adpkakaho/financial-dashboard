@@ -10,37 +10,66 @@ import streamlit as st
 from pages.charts import make_line, make_bar, kpi_card
 from utils import sign, fmt1
 
+# ── ETF 필터: 대형 시장지수 ETF 제외 키워드 ─────────────────────────
+# 코스피200·나스닥100 등 대표지수 ETF는 항상 거래대금 상위를 차지해
+# 섹터·테마 ETF 다양성을 보기 어렵기 때문에 제외
+_ETF_EXCLUDE_INDEX = [
+    "코스피200", "KOSPI200", "KRX300",
+    "S&P500", "나스닥100", "NASDAQ100",
+    "코스닥150", "KOSDAQ150",
+    "미국S&P500", "미국나스닥",
+]
+# 레버리지·인버스 ETF 제외 키워드 (ETF명 기준)
+_ETF_EXCLUDE_NAME = [
+    "레버리지", "LEVERAGE", "2X", "3X",
+    "인버스", "INVERSE", "-1X", "-2X",
+    "곱버스",
+]
+
+def _filter_etf(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    대형 시장지수 ETF 및 레버리지·인버스 ETF 제외
+    - IDX_IND_NM(기초지수명): 코스피200·나스닥100 등 대표지수 제외
+    - ISU_NM(ETF명): 레버리지·인버스 키워드 포함 시 제외
+    """
+    if df.empty:
+        return df
+    mask_idx  = df["IDX_IND_NM"].astype(str).apply(
+        lambda x: any(kw in x for kw in _ETF_EXCLUDE_INDEX)
+    )
+    mask_name = df["ISU_NM"].astype(str).apply(
+        lambda x: any(kw.upper() in x.upper() for kw in _ETF_EXCLUDE_NAME)
+    )
+    return df[~(mask_idx | mask_name)].reset_index(drop=True)
+
 
 def render(data: dict) -> None:
-    mf           = data.get("market_funds",  pd.DataFrame())
-    cr           = data.get("credit",        pd.DataFrame())
-    fn           = data.get("fund_nav",      pd.DataFrame())
-    idx          = data.get("indices",       {})
-    etf          = data.get("etf_top10",     pd.DataFrame())
-    bond         = data.get("bond_market",   pd.DataFrame())
-    bond_hist    = data.get("bond_history",  pd.DataFrame())
-    gold         = data.get("gold",          {})
-    gold_hist    = data.get("gold_history",  pd.DataFrame())
+    mf        = data.get("market_funds",  pd.DataFrame())
+    cr        = data.get("credit",        pd.DataFrame())
+    fn        = data.get("fund_nav",      pd.DataFrame())
+    idx       = data.get("indices",       {})
+    etf       = data.get("etf_top10",     pd.DataFrame())
+    bond      = data.get("bond_market",   pd.DataFrame())
+    bond_hist = data.get("bond_history",  pd.DataFrame())
+    gold      = data.get("gold",          {})
+    gold_hist = data.get("gold_history",  pd.DataFrame())
 
-    mf_last = mf.iloc[-1].to_dict() if not mf.empty else {}
-    mf_prev = mf.iloc[-2].to_dict() if len(mf) > 1  else {}
-    cr_last = cr.iloc[-1].to_dict() if not cr.empty  else {}
-    cr_prev = cr.iloc[-2].to_dict() if len(cr) > 1   else {}
-    mf_flow = round(float(mf_last.get("합계", 0)) - float(mf_prev.get("합계", 0)), 1) if mf_prev else 0
-    cr_chg  = round(float(cr_last.get("신용융자", 0)) - float(cr_prev.get("신용융자", 0)), 2) if cr_prev else 0
+    mf_last  = mf.iloc[-1].to_dict() if not mf.empty else {}
+    mf_prev  = mf.iloc[-2].to_dict() if len(mf) > 1  else {}
+    cr_last  = cr.iloc[-1].to_dict() if not cr.empty  else {}
+    cr_prev  = cr.iloc[-2].to_dict() if len(cr) > 1   else {}
+    mf_flow  = round(float(mf_last.get("합계", 0)) - float(mf_prev.get("합계", 0)), 1) if mf_prev else 0
+    cr_chg   = round(float(cr_last.get("신용융자", 0)) - float(cr_prev.get("신용융자", 0)), 2) if cr_prev else 0
     kofia_ok = not mf.empty or not cr.empty or not fn.empty
 
     st.markdown("## 📅 데일리")
     st.caption("출처: KOFIA · KRX · ECOS · yfinance · 매일 갱신")
-
     if not kofia_ok:
         st.warning("⚠️ KOFIA 서버 일시 장애 — KRX·ECOS·yfinance 섹션은 정상입니다.")
 
-    # ── KPI 5개 ──
+    # ── KPI 5개 ──────────────────────────────────────────────────────
     kospi_v = idx.get("KOSPI", {})
     vix_v   = idx.get("VIX",   {})
-
-    # 주식형 순자산 안전 추출
     fn_stock_nav = "—"
     if kofia_ok and not fn.empty:
         fn_stock = fn[fn["ctg"] == "주식형"]
@@ -65,11 +94,13 @@ def render(data: dict) -> None:
 
     st.divider()
 
-    # ── 펀드 플로우 ──
+    # ── 펀드 플로우 ──────────────────────────────────────────────────
     st.markdown("### 펀드 플로우 `KOFIA`")
     if not fn.empty:
         key_types  = ["주식형", "채권형", "단기금융", "부동산"]
         colors_map = ["#2563EB", "#7C3AED", "#0891B2", "#EA580C"]
+
+        # KPI 카드
         cols = st.columns(4)
         for col, ctg, color in zip(cols, key_types, colors_map):
             rows = fn[fn["ctg"] == ctg]
@@ -80,16 +111,17 @@ def render(data: dict) -> None:
                                 unsafe_allow_html=True)
 
         st.markdown("")
-        total = fn.groupby("basDt")["nPptTotAmt"].sum().reset_index()
-        total["flow"] = (total["nPptTotAmt"].diff() / 1e12).round(2)
-
         c1, c2 = st.columns(2)
+
         with c1:
-            st.markdown("**유형별 주간 플로우**")
+            # 주간 플로우 = 직전 5영업일(iloc[-1] vs iloc[-6]) 기준
+            st.markdown("**유형별 주간 플로우** <span style='font-size:11px;color:#94A3B8;'>직전 5영업일 기준</span>",
+                        unsafe_allow_html=True)
             flow_data = []
             for ctg in key_types:
                 rows = fn[fn["ctg"] == ctg].sort_values("basDt")
                 if len(rows) >= 6:
+                    # iloc[-1]: 최신일 / iloc[-6]: 5영업일 전 (6번째 앞 행)
                     wflow = round((rows["nPptTotAmt"].iloc[-1] - rows["nPptTotAmt"].iloc[-6]) / 1e12, 2)
                     flow_data.append({"유형": ctg, "주간플로우": wflow})
             if flow_data:
@@ -97,21 +129,44 @@ def render(data: dict) -> None:
                 fig = go.Figure(go.Bar(
                     x=df_f["유형"], y=df_f["주간플로우"],
                     marker_color=["#2563EB" if v >= 0 else "#EF4444" for v in df_f["주간플로우"]],
+                    text=[f"{v:+.2f}조" for v in df_f["주간플로우"]],
+                    textposition="outside",
                 ))
-                fig.update_layout(height=200, margin=dict(l=0, r=0, t=10, b=0),
+                fig.update_layout(height=220, margin=dict(l=0, r=0, t=30, b=0),
                                   plot_bgcolor="#fff", paper_bgcolor="#fff",
                                   yaxis=dict(gridcolor="#F1F5F9", ticksuffix="조"))
                 st.plotly_chart(fig, use_container_width=True)
+
         with c2:
-            st.markdown("**전체 일별 플로우**")
-            st.plotly_chart(make_bar(total.tail(15), "basDt", "flow", height=200, y_suffix="조"),
-                            use_container_width=True)
+            # 일별 플로우: 유형별 누적 스택 바차트
+            st.markdown("**유형별 일별 플로우 (누적)** <span style='font-size:11px;color:#94A3B8;'>최근 15일</span>",
+                        unsafe_allow_html=True)
+            fig_stack = go.Figure()
+            for ctg, color in zip(key_types, colors_map):
+                rows = fn[fn["ctg"] == ctg].sort_values("basDt").tail(15).copy()
+                if not rows.empty:
+                    rows["flow"] = (rows["nPptTotAmt"].diff() / 1e12).round(2)
+                    fig_stack.add_trace(go.Bar(
+                        x=rows["basDt"], y=rows["flow"],
+                        name=ctg, marker_color=color,
+                        hovertemplate=f"{ctg}: %{{y:.2f}}조<extra></extra>",
+                    ))
+            fig_stack.update_layout(
+                barmode="relative",  # 누적 (양/음 분리 표시)
+                height=220, margin=dict(l=0, r=0, t=30, b=0),
+                plot_bgcolor="#fff", paper_bgcolor="#fff",
+                xaxis=dict(tickformat="%m/%d", gridcolor="#F1F5F9"),
+                yaxis=dict(gridcolor="#F1F5F9", ticksuffix="조"),
+                legend=dict(orientation="h", y=1.15),
+                hovermode="x unified",
+            )
+            st.plotly_chart(fig_stack, use_container_width=True)
     else:
         st.info("KOFIA 서버 복구 후 표시됩니다.")
 
     st.divider()
 
-    # ── 증시 대기자금 ──
+    # ── 증시 대기자금 ─────────────────────────────────────────────────
     st.markdown("### 증시 대기자금 `KOFIA`")
     if not mf.empty:
         cols = st.columns(5)
@@ -119,27 +174,36 @@ def render(data: dict) -> None:
             ["합계", "예탁금", "RP", "CMA", "MMF"],
             ["#D97706", "#2563EB", "#0891B2", "#7C3AED", "#0284C7"]):
             with col:
-                st.markdown(kpi_card(key, f"{fmt1(float(mf_last.get(key, 0)))}조", "최신", color, "KOFIA", False),
-                            unsafe_allow_html=True)
+                st.markdown(kpi_card(key, f"{fmt1(float(mf_last.get(key, 0)))}조",
+                                     "최신", color, "KOFIA", False), unsafe_allow_html=True)
         st.markdown("")
-        # 호버 시 세부 구성(예탁금/RP/CMA/MMF) 보이는 스택 영역 차트
+
+        # MMF 데이터 시작일 기준으로 표시 기간 자동 결정
+        # MMF API 제공 범위가 약 1개월이므로 전체를 MMF 시작일 이후로 맞춤
+        mf_plot = mf.copy()
+        if "MMF" in mf_plot.columns:
+            mmf_start = mf_plot["MMF"].first_valid_index()
+            if mmf_start is not None:
+                mf_plot = mf_plot[mf_plot.index >= mmf_start] if mf_plot.index.dtype != "O" else                           mf_plot[mf_plot["basDt"] >= mf_plot.loc[mmf_start, "basDt"]]                           if mmf_start in mf_plot.index else mf_plot.dropna(subset=["MMF"])
+
+        # 각 항목 개별 꺾은선 (스택 아님) + 호버 unified
         fig_mf = go.Figure()
-        stack_items = [
+        line_items = [
             ("예탁금", "#2563EB"),
             ("RP",    "#0891B2"),
             ("CMA",   "#7C3AED"),
             ("MMF",   "#0284C7"),
         ]
-        for col_name, color in stack_items:
-            if col_name in mf.columns:
+        for col_name, color in line_items:
+            if col_name in mf_plot.columns:
                 fig_mf.add_trace(go.Scatter(
-                    x=mf["basDt"], y=mf[col_name],
-                    name=col_name, stackgroup="one",
-                    mode="lines", line=dict(width=0.5, color=color),
+                    x=mf_plot["basDt"], y=mf_plot[col_name],
+                    name=col_name, mode="lines",
+                    line=dict(color=color, width=2),
                     hovertemplate=f"{col_name}: %{{y:.1f}}조<extra></extra>",
                 ))
         fig_mf.update_layout(
-            height=200, margin=dict(l=0, r=0, t=10, b=0),
+            height=220, margin=dict(l=0, r=0, t=10, b=0),
             plot_bgcolor="#fff", paper_bgcolor="#fff",
             xaxis=dict(showgrid=True, gridcolor="#F1F5F9", tickformat="%m/%d"),
             yaxis=dict(showgrid=True, gridcolor="#F1F5F9", ticksuffix="조"),
@@ -147,27 +211,34 @@ def render(data: dict) -> None:
             legend=dict(orientation="h", y=1.1),
         )
         st.plotly_chart(fig_mf, use_container_width=True)
+        st.caption("※ MMF 데이터 제공 시작일 기준으로 표시 기간 자동 조정")
     else:
         st.info("KOFIA 서버 복구 후 표시됩니다.")
 
     st.divider()
 
-    # ── KRX ETF ──
+    # ── KRX ETF ──────────────────────────────────────────────────────
     st.markdown("### KRX ETF 거래대금 TOP10 `KRX-ETF`")
+    st.caption("※ 대형 시장지수(코스피200·나스닥100 등) 및 레버리지·인버스 ETF 제외 — 섹터·테마 중심")
     if not etf.empty:
-        disp = etf[["ISU_NM", "거래대금(억)", "FLUC_RT", "IDX_IND_NM"]].copy()
-        disp.columns = ["ETF명", "거래대금(억)", "등락률(%)", "기초지수"]
-        st.dataframe(disp, use_container_width=True, hide_index=True)
+        etf_filtered = _filter_etf(etf).head(10)
+        if etf_filtered.empty:
+            st.info("필터 적용 후 표시할 ETF가 없습니다.")
+        else:
+            disp = etf_filtered[["ISU_NM", "거래대금(억)", "FLUC_RT", "IDX_IND_NM"]].copy()
+            disp.columns = ["ETF명", "거래대금(억)", "등락률(%)", "기초지수"]
+            st.dataframe(disp, use_container_width=True, hide_index=True)
     else:
         st.warning("📭 KRX ETF 데이터 없음 — 영업일이 아니거나 API 키를 확인해 주세요.")
 
-    # ── 채권 거래 현황 (시계열 + 스냅샷) ──
+    st.divider()
+
+    # ── 채권 거래 현황 ────────────────────────────────────────────────
     st.markdown("### 채권 거래 현황 `KRX-BON`")
     if not bond_hist.empty:
-        # 유형별 라인 시계열
-        fig_bh = go.Figure()
         bond_colors = {"국민주택채권": "#2563EB", "금융채": "#7C3AED",
                        "특수채": "#0891B2", "기타": "#94A3B8"}
+        fig_bh = go.Figure()
         for 유형, grp in bond_hist.groupby("유형"):
             grp = grp.sort_values("date")
             fig_bh.add_trace(go.Scatter(
@@ -175,13 +246,24 @@ def render(data: dict) -> None:
                 name=str(유형), mode="lines+markers",
                 line=dict(color=bond_colors.get(str(유형), "#94A3B8"), width=2),
                 marker=dict(size=4),
+                hovertemplate=f"{유형}: %{{y:.0f}}억<extra></extra>",
             ))
         fig_bh.update_layout(height=220, margin=dict(l=0, r=0, t=10, b=0),
                              plot_bgcolor="#fff", paper_bgcolor="#fff",
                              xaxis=dict(tickformat="%m/%d", gridcolor="#F1F5F9"),
                              yaxis=dict(gridcolor="#F1F5F9", ticksuffix="억"),
+                             hovermode="x unified",
                              legend=dict(orientation="h", y=1.1))
         st.plotly_chart(fig_bh, use_container_width=True)
+
+        # 당일 거래 종목 TOP5
+        if not bond.empty:
+            st.markdown("**당일 거래 종목 TOP5**")
+            # bond_market 원본 데이터에서 종목별로 가져옴
+            bond_top = bond.sort_values("거래대금(억)", ascending=False).head(5)
+            disp_bond = bond_top[["유형", "거래대금(억)"]].copy()
+            st.dataframe(disp_bond, use_container_width=True, hide_index=True)
+
     elif not bond.empty:
         fig = go.Figure(go.Bar(
             x=bond["유형"], y=bond["거래대금(억)"],
@@ -194,7 +276,9 @@ def render(data: dict) -> None:
     else:
         st.warning("📭 채권 거래 데이터 없음 — 영업일이 아니거나 API 키를 확인해 주세요.")
 
-    # ── 금 시세 (시계열 + 현재값) ──
+    st.divider()
+
+    # ── 금 시세 ──────────────────────────────────────────────────────
     st.markdown("### 금 시세 `KRX-GLD`")
     if gold:
         c_a, c_b, c_c = st.columns(3)
@@ -205,24 +289,42 @@ def render(data: dict) -> None:
             st.metric("등락률", f"{gold.get('fluc', 0):.2f}%")
         with c_c:
             st.metric("거래대금", f"{gold.get('val', 0):.1f}억원")
+
     if not gold_hist.empty:
+        # 종가(좌축 꺾은선) + 거래대금(우축 막대) 이중축 차트
         fig_gh = go.Figure()
+        fig_gh.add_trace(go.Bar(
+            x=gold_hist["date"], y=gold_hist["val"],
+            name="거래대금(억)", yaxis="y2",
+            marker_color="#FDE68A",
+            opacity=0.7,
+            hovertemplate="거래대금: %{y:.1f}억<extra></extra>",
+        ))
         fig_gh.add_trace(go.Scatter(
             x=gold_hist["date"], y=gold_hist["price"],
-            mode="lines+markers", name="종가(원/g)",
-            line=dict(color="#D97706", width=2), marker=dict(size=4),
+            name="종가(원/g)", yaxis="y1",
+            mode="lines+markers",
+            line=dict(color="#D97706", width=2),
+            marker=dict(size=4),
+            hovertemplate="종가: %{y:,.0f}원/g<extra></extra>",
         ))
-        fig_gh.update_layout(height=200, margin=dict(l=0, r=0, t=10, b=0),
-                             plot_bgcolor="#fff", paper_bgcolor="#fff",
-                             xaxis=dict(tickformat="%m/%d", gridcolor="#F1F5F9"),
-                             yaxis=dict(gridcolor="#F1F5F9", ticksuffix="원"))
+        fig_gh.update_layout(
+            height=220, margin=dict(l=0, r=0, t=10, b=0),
+            plot_bgcolor="#fff", paper_bgcolor="#fff",
+            xaxis=dict(tickformat="%m/%d", gridcolor="#F1F5F9"),
+            yaxis=dict(title="원/g", gridcolor="#F1F5F9", tickformat=","),
+            yaxis2=dict(title="거래대금(억)", overlaying="y", side="right",
+                        showgrid=False),
+            legend=dict(orientation="h", y=1.1),
+            hovermode="x unified",
+        )
         st.plotly_chart(fig_gh, use_container_width=True)
     elif not gold:
         st.warning("📭 금 시세 데이터 없음 — 영업일이 아니거나 API 키를 확인해 주세요.")
 
     st.divider()
 
-    # ── 신용융자 ──
+    # ── 신용융자 ─────────────────────────────────────────────────────
     st.markdown("### 신용융자 잔고 `KOFIA`")
     if not cr.empty:
         c1, c2 = st.columns([1, 2])
@@ -231,7 +333,7 @@ def render(data: dict) -> None:
                 f"{fmt1(float(cr_last.get('신용융자', 0)))}조",
                 f"전일 {sign(cr_chg)}{cr_chg}조", "#EA580C", "KOFIA"), unsafe_allow_html=True)
         with c2:
-            st.plotly_chart(make_line(cr, "basDt", "신용융자", color="#EA580C", height=130, y_suffix="조"),
-                            use_container_width=True)
+            st.plotly_chart(make_line(cr, "basDt", "신용융자", color="#EA580C",
+                                      height=130, y_suffix="조"), use_container_width=True)
     else:
         st.info("KOFIA 서버 복구 후 표시됩니다.")
