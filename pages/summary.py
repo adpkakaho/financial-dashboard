@@ -126,7 +126,9 @@ def render(data: dict) -> None:
     with c1:
         st.markdown("**증시 대기자금** `KOFIA`")
         if not mf.empty:
-            st.plotly_chart(make_line(mf, "basDt", "합계", color="#0891B2", height=170, y_suffix="조"),
+            # 합계가 None인 행(MMF 없는 구간) 제거 → 데이터 있는 구간만 표시
+            mf_valid = mf.dropna(subset=["합계"])
+            st.plotly_chart(make_line(mf_valid, "basDt", "합계", color="#0891B2", height=170, y_suffix="조"),
                             use_container_width=True)
         else:
             st.info("KOFIA 서버 복구 후 표시")
