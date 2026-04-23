@@ -23,7 +23,7 @@ KRX_KEY   = ""
 ECOS_KEY  = ""
 
 BASE_KOFIA = "https://apis.data.go.kr/1160100/service/GetKofiaStatisticsInfoService"
-BASE_ISA   = "https://apis.data.go.kr/1160100/service/GetISAInfoService_V2"
+BASE_ISA   = "https://apis.data.go.kr/1160100/GetISAInfoService_V2"  # /service/ 없음
 BASE_ECOS  = "https://ecos.bok.or.kr/api/StatisticSearch"
 BASE_KRX   = "https://data-dbg.krx.co.kr/svc/apis"
 
@@ -133,7 +133,7 @@ def get_fund_nav():
 
 def get_market_funds():
     """[KOFIA-D] 증시 대기자금 합산"""
-    df_dep  = _kofia_get("GetSecuritiesMarketTotalCapitalInfo")
+    df_dep  = _kofia_get("getSecuritiesMarketTotalCapitalInfo")
     df_cma  = _kofia_get("getCMAStatus")
     df_fund = get_fund_nav()
     result  = {}
@@ -315,17 +315,17 @@ def get_trust():
     """[KOFIA-M] 신탁 업권별 수탁총액"""
     start_dt = (datetime.today() - timedelta(days=210)).strftime("%Y%m%d")
     end_dt   = datetime.today().strftime("%Y%m%d")
-    return _kofia_get("getTrusBusiInfoService", {
+    return _kofia_get("getTrustScaleInfo", {
         "beginBasDt": start_dt,
         "endBasDt":   end_dt,
         "numOfRows":  "1000",
     })
 
 def get_els():
-    """[KOFIA-M] ELS/DLS 발행·상환"""
+    """[KOFIA-M] ELS/ELB 발행·상환 · getELSAndELBInfo"""
     start_dt = (datetime.today() - timedelta(days=210)).strftime("%Y%m%d")
     end_dt   = datetime.today().strftime("%Y%m%d")
-    df = _kofia_get("getElsBlbIssuPresInfo", {
+    df = _kofia_get("getELSAndELBInfo", {
         "beginBasDt": start_dt,
         "endBasDt":   end_dt,
         "numOfRows":  "200",

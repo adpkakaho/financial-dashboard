@@ -167,11 +167,11 @@ def main():
     els_df = data.get("els",   pd.DataFrame())
     trust_df = data.get("trust", pd.DataFrame())
 
-    mf_last  = mf.iloc[-1]  if not mf.empty else {}
-    mf_prev  = mf.iloc[-2]  if len(mf) > 1  else {}
-    cr_last  = cr.iloc[-1]  if not cr.empty else {}
-    cr_prev  = cr.iloc[-2]  if len(cr) > 1  else {}
-    isa_last = it.iloc[-1]  if not it.empty else {}
+    mf_last  = mf.iloc[-1].to_dict()  if not mf.empty else {}
+    mf_prev  = mf.iloc[-2].to_dict()  if len(mf) > 1  else {}
+    cr_last  = cr.iloc[-1].to_dict()  if not cr.empty else {}
+    cr_prev  = cr.iloc[-2].to_dict()  if len(cr) > 1  else {}
+    isa_last = it.iloc[-1].to_dict()  if not it.empty else {}
     mf_flow  = round(float(mf_last.get("합계",0)) - float(mf_prev.get("합계",0)), 1) if mf_prev else 0
     cr_chg   = round(float(cr_last.get("신용융자",0)) - float(cr_prev.get("신용융자",0)), 2) if cr_prev else 0
 
