@@ -122,8 +122,31 @@ def render(data: dict) -> None:
                 st.markdown(kpi_card(key, f"{fmt1(float(mf_last.get(key, 0)))}조", "최신", color, "KOFIA", False),
                             unsafe_allow_html=True)
         st.markdown("")
-        st.plotly_chart(make_line(mf, "basDt", "합계", color="#0891B2", height=200, y_suffix="조"),
-                        use_container_width=True)
+        # 호버 시 세부 구성(예탁금/RP/CMA/MMF) 보이는 스택 영역 차트
+        fig_mf = go.Figure()
+        stack_items = [
+            ("예탁금", "#2563EB"),
+            ("RP",    "#0891B2"),
+            ("CMA",   "#7C3AED"),
+            ("MMF",   "#0284C7"),
+        ]
+        for col_name, color in stack_items:
+            if col_name in mf.columns:
+                fig_mf.add_trace(go.Scatter(
+                    x=mf["basDt"], y=mf[col_name],
+                    name=col_name, stackgroup="one",
+                    mode="lines", line=dict(width=0.5, color=color),
+                    hovertemplate=f"{col_name}: %{{y:.1f}}조<extra></extra>",
+                ))
+        fig_mf.update_layout(
+            height=200, margin=dict(l=0, r=0, t=10, b=0),
+            plot_bgcolor="#fff", paper_bgcolor="#fff",
+            xaxis=dict(showgrid=True, gridcolor="#F1F5F9", tickformat="%m/%d"),
+            yaxis=dict(showgrid=True, gridcolor="#F1F5F9", ticksuffix="조"),
+            hovermode="x unified",
+            legend=dict(orientation="h", y=1.1),
+        )
+        st.plotly_chart(fig_mf, use_container_width=True)
     else:
         st.info("KOFIA 서버 복구 후 표시됩니다.")
 
