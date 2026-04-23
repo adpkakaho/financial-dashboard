@@ -435,26 +435,41 @@ def get_gold_history(keys: ApiKeys, days_back: int = 30) -> pd.DataFrame:
 # ══════════════════════════════════════════════════════════════
 
 def get_trust(keys: ApiKeys) -> pd.DataFrame:
-    """[KOFIA-M] 신탁 업권별 수탁총액"""
+    """[KOFIA-M] 신탁 상품별 수탁총액 — 5개월치, tstCtg(상품구분) 포함"""
     return _kofia_get(keys, "getTrustScaleInfo", {
-        "beginBasDt": months_ago_str(7),
+        "beginBasDt": months_ago_str(5),
         "endBasDt":   today_str(),
-        "numOfRows":  "1000",
+        "numOfRows":  "2000",
     })
 
 
 def get_els(keys: ApiKeys) -> pd.DataFrame:
-    """[KOFIA-M] ELS/ELB 발행·상환"""
+    """[KOFIA-M] ELS/ELB 발행·상환 (합계 행 기준, 5개월치)"""
     df = _kofia_get(keys, "getELSAndELBInfo", {
-        "beginBasDt": months_ago_str(7),
+        "beginBasDt": months_ago_str(5),
         "endBasDt":   today_str(),
-        "numOfRows":  "200",
+        "numOfRows":  "500",
     })
     if df.empty:
         return df
-    for col in df.select_dtypes(include="object").columns:
-        if col != "basDt":
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["amt"] = pd.to_numeric(df["amt"], errors="coerce")
+    df["ccnt"] = pd.to_numeric(df["ccnt"], errors="coerce")
+    return df
+
+
+def get_dls(keys: ApiKeys) -> pd.DataFrame:
+    """[KOFIA-M] DLS/DLB 발행·상환 (합계 행 기준, 5개월치)
+    ELS와 별도 엔드포인트, 컬럼명 ctgDlbDls 사용
+    """
+    df = _kofia_get(keys, "getDLSAndDLBInfo", {
+        "beginBasDt": months_ago_str(5),
+        "endBasDt":   today_str(),
+        "numOfRows":  "500",
+    })
+    if df.empty:
+        return df
+    df["amt"] = pd.to_numeric(df["amt"], errors="coerce")
+    df["ccnt"] = pd.to_numeric(df["ccnt"], errors="coerce")
     return df
 
 
@@ -524,7 +539,8 @@ def collect_all(kofia_key: str, krx_key: str, ecos_key: str) -> dict:
         ("isa_trend",     "ISA 잔고 추이",             lambda: get_isa_trend(keys)),
         ("isa_assets",    "ISA 편입자산",              lambda: get_isa_assets(keys)),
         ("trust",         "신탁",                     lambda: get_trust(keys)),
-        ("els",           "ELS/DLS",                  lambda: get_els(keys)),
+        ("els",           "ELS",                      lambda: get_els(keys)),
+        ("dls",           "DLS",                      lambda: get_dls(keys)),
     ]
 
     for key, label, fn in steps:
