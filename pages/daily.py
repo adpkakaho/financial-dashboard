@@ -105,26 +105,30 @@ def render(data: dict) -> None:
                 "<span style='font-size:11px;color:#94A3B8;'>최근 15일</span>",
                 unsafe_allow_html=True)
 
-            # 유형별로 일별 diff 계산 후 공통 날짜 기준으로 pivot
-            # → 모든 유형을 같은 날짜축으로 맞춰야 barmode=relative가 정확히 동작
+            # 펀드 NAV는 공모/사모 두 행이 같은 날짜에 존재
+            # → 날짜별 합산 먼저 한 뒤 diff() 계산해야 정확한 일별 플로우
             flow_frames = []
             for ctg, color in zip(key_types, colors_map):
-                rows = fn[fn["ctg"] == ctg].sort_values("basDt").copy()
-                rows = rows.drop_duplicates(subset=["basDt"])  # 날짜 중복 제거
-                if len(rows) >= 2:
-                    rows["flow"] = (rows["nPptTotAmt"].diff() / 1e12).round(2)
-                    rows = rows.dropna(subset=["flow"]).tail(15)
-                    rows["ctg"] = ctg
-                    rows["color"] = color
-                    flow_frames.append(rows[["basDt", "flow", "ctg", "color"]])
+                rows = fn[fn["ctg"] == ctg].copy()
+                # 날짜별 합산 (공모+사모 통합)
+                daily = (rows.groupby("basDt")["nPptTotAmt"].sum()
+                             .reset_index().sort_values("basDt"))
+                if len(daily) >= 2:
+                    daily["flow"] = (daily["nPptTotAmt"].diff() / 1e12).round(2)
+                    daily = daily.dropna(subset=["flow"]).tail(15)
+                    daily["ctg"]   = ctg
+                    daily["color"] = color
+                    flow_frames.append(daily[["basDt", "flow", "ctg", "color"]])
 
             fig_stack = go.Figure()
             if flow_frames:
                 for frame in flow_frames:
                     ctg   = frame["ctg"].iloc[0]
                     color = frame["color"].iloc[0]
+                    # x축을 문자열로 변환 → timestamp 그대로 찍히는 문제 방지
+                    x_labels = frame["basDt"].dt.strftime("%m/%d")
                     fig_stack.add_trace(go.Bar(
-                        x=frame["basDt"],
+                        x=x_labels,
                         y=frame["flow"],
                         name=ctg,
                         marker_color=color,
@@ -135,7 +139,7 @@ def render(data: dict) -> None:
                 barmode="relative",
                 height=220, margin=dict(l=0, r=0, t=30, b=0),
                 plot_bgcolor="#fff", paper_bgcolor="#fff",
-                xaxis=dict(tickformat="%m/%d", gridcolor="#F1F5F9", type="category"),
+                xaxis=dict(gridcolor="#F1F5F9"),
                 yaxis=dict(gridcolor="#F1F5F9", ticksuffix="조",
                            zeroline=True, zerolinecolor="#94A3B8", zerolinewidth=1),
                 legend=dict(orientation="h", y=1.15),

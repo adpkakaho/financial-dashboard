@@ -47,6 +47,10 @@ def _trust_charts(trust_df: pd.DataFrame):
         pivot_ctg = (df_total.groupby([date_col, ctg_col])["val"].sum()
                              .reset_index().sort_values(date_col))
 
+        # 최근 6개월만 표시
+        cutoff_6m = pivot_ctg[date_col].max() - pd.DateOffset(months=6)
+        pivot_ctg = pivot_ctg[pivot_ctg[date_col] >= cutoff_6m]
+
         # 주요 상품 6개만 (금액 큰 순)
         top_ctgs = (pivot_ctg.groupby(ctg_col)["val"].sum()
                              .sort_values(ascending=False).head(6).index.tolist())
@@ -65,7 +69,6 @@ def _trust_charts(trust_df: pd.DataFrame):
                 marker=dict(size=5),
                 hovertemplate=f"{short}: %{{y:.1f}}조<extra></extra>",
             ))
-        # x축: dtick 없이 데이터 범위 자동 맞춤 (데이터 없는 월 빈칸 방지)
         fig_line.update_layout(
             height=260, margin=dict(l=0, r=0, t=10, b=0),
             plot_bgcolor=_WHITE, paper_bgcolor=_WHITE,
@@ -168,12 +171,29 @@ def _els_dls_charts(els_df: pd.DataFrame, dls_df: pd.DataFrame):
             marker_color=color_map.get((str(tp), str(pres)), "#94A3B8"),
             hovertemplate=f"{tp} {label_map.get(pres,'')}: %{{y:.2f}}조<extra></extra>",
         ))
-    # x축: dtick 없이 실제 데이터 월만 표시 (API 제공 범위 자동 반영)
+    # x축: 최근 4개월만 표시, timestamp→문자열 변환으로 포맷 문제 방지
+    if not grp.empty:
+        cutoff_4m = grp["_date"].max() - pd.DateOffset(months=4)
+        grp = grp[grp["_date"] >= cutoff_4m]
+        # x축 레이블을 %y/%m 문자열로 변환
+        grp = grp.copy()
+        grp["_label"] = grp["_date"].dt.strftime("%y/%m")
+        # traces 재구성
+        fig_bar = go.Figure()
+        for (tp, pres), sub in grp.groupby(["_type", "presCtg"]):
+            fig_bar.add_trace(go.Bar(
+                x=sub["_label"],
+                y=(sub["amt"] / 1e12).round(2),
+                name=f"{tp} {label_map.get(pres, pres)}",
+                marker_color=color_map.get((str(tp), str(pres)), "#94A3B8"),
+                hovertemplate=f"{tp} {label_map.get(pres,'')}: %{{y:.2f}}조<extra></extra>",
+            ))
+
     fig_bar.update_layout(
         barmode="group", height=260,
         margin=dict(l=0, r=0, t=10, b=0),
         plot_bgcolor=_WHITE, paper_bgcolor=_WHITE,
-        xaxis=dict(tickformat="%y/%m", gridcolor=_GRID, type="category"),
+        xaxis=dict(gridcolor=_GRID),
         yaxis=dict(gridcolor=_GRID, ticksuffix="조"),
         legend=dict(orientation="h", y=1.1),
         hovermode="x unified",
