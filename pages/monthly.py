@@ -1,9 +1,6 @@
 """
-pages/monthly.py
-================
-먼슬리 페이지 렌더러 — ISA / 신탁 / ELS/DLS
+pages/monthly.py — 먼슬리 페이지 렌더러 (ISA / 신탁 / ELS/DLS)
 """
-
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -12,18 +9,15 @@ from utils import sign, fmt1
 
 _GRID  = "#F1F5F9"
 _WHITE = "#fff"
+_BIZ_COLORS = {"증권": "#2563EB", "은행": "#0891B2",
+               "보험": "#7C3AED", "부동산": "#EA580C", "기타": "#94A3B8"}
 
-# ── 신탁 업권별 색상 ──────────────────────────────────────────────────
-_BIZ_COLORS = {
-    "증권": "#2563EB", "은행": "#0891B2",
-    "보험": "#7C3AED", "부동산": "#EA580C", "기타": "#94A3B8",
-}
 
 def _trust_charts(trust_df: pd.DataFrame):
     """
-    신탁 데이터 시각화
-    실제 컬럼: basYm, bzds(업권), tstCtg(신탁구분), iqBs(조회기준), val(값)
-    - 업권별(증권/은행/보험/부동산) KPI + 꺾은선 추이 + 도넛
+    신탁 시각화
+    실제 컬럼: basYm(YYYYMM), bzds(업권), tstCtg(신탁구분/상품명), iqBs(수탁총액), val
+    - 상품별(tstCtg) 꺾은선 추이 + 업권별 도넛
     """
     if trust_df.empty:
         return None, None, None
@@ -31,154 +25,157 @@ def _trust_charts(trust_df: pd.DataFrame):
     df = trust_df.copy()
     date_col = "basYm" if "basYm" in df.columns else "basDt"
     biz_col  = "bzds"   if "bzds"  in df.columns else None
+    ctg_col  = "tstCtg" if "tstCtg" in df.columns else None
     iqbs_col = "iqBs"   if "iqBs"  in df.columns else None
 
     df[date_col] = pd.to_datetime(
-        df[date_col].astype(str).str[:6], format="%Y%m", errors="coerce"
-    )
+        df[date_col].astype(str).str[:6], format="%Y%m", errors="coerce")
     df["val"] = pd.to_numeric(df["val"], errors="coerce")
 
-    # 수탁총액 행만 사용
+    # 수탁총액 기준 필터
     if iqbs_col:
         df = df[df[iqbs_col] == "수탁총액"].copy()
 
-    # 업권별 집계 (합계 행 제외)
-    if biz_col:
-        df_biz = df[~df[biz_col].isin(["합계", ""])].copy()
-    else:
-        df_biz = df.copy()
-
-    if df_biz.empty:
-        return None, None, None
-
-    # 월별 × 업권별 집계
-    pivot = (df_biz.groupby([date_col, biz_col])["val"].sum()
-                   .reset_index().sort_values(date_col))
-
-    # ── 꺾은선 추이 (업권별 개별 라인, 가독성 우선) ──
-    fig_line = go.Figure()
-    biz_list = pivot[biz_col].unique()
-    for biz in biz_list:
-        sub = pivot[pivot[biz_col] == biz].sort_values(date_col)
-        color = _BIZ_COLORS.get(str(biz), "#94A3B8")
-        fig_line.add_trace(go.Scatter(
-            x=sub[date_col], y=(sub["val"] / 1e12).round(1),
-            name=str(biz), mode="lines+markers",
-            line=dict(color=color, width=2),
-            marker=dict(size=5),
-            hovertemplate=f"{biz}: %{{y:.1f}}조<extra></extra>",
-        ))
-    fig_line.update_layout(
-        height=240, margin=dict(l=0, r=0, t=10, b=0),
-        plot_bgcolor=_WHITE, paper_bgcolor=_WHITE,
-        xaxis=dict(tickformat="%y/%m", gridcolor=_GRID),
-        yaxis=dict(gridcolor=_GRID, ticksuffix="조"),
-        hovermode="x unified",
-        legend=dict(orientation="h", y=1.12),
-    )
-
-    # ── 도넛: 최신 월 업권별 구성 ──
-    latest = pivot[date_col].max()
-    latest_df = pivot[pivot[date_col] == latest].groupby(biz_col)["val"].sum()
-    fig_donut = None
-    if not latest_df.empty:
-        colors = [_BIZ_COLORS.get(b, "#94A3B8") for b in latest_df.index]
-        fig_donut = go.Figure(go.Pie(
-            labels=latest_df.index.tolist(),
-            values=(latest_df / 1e12).round(1).tolist(),
-            hole=0.5,
-            marker_colors=colors,
-            textinfo="label+percent",
-            textfont_size=11,
-        ))
-        fig_donut.update_layout(
-            height=240, margin=dict(l=0, r=0, t=10, b=10),
-            paper_bgcolor=_WHITE,
-            showlegend=False,
-            annotations=[dict(
-                text=f"{latest.strftime('%y/%m')}<br>기준",
-                x=0.5, y=0.5, font_size=11, showarrow=False,
-            )],
-        )
-
-    return pivot, fig_line, fig_donut
-
-
-def _els_charts(els_df: pd.DataFrame):
-    """
-    ELS/DLS 시각화
-    실제 컬럼: basDt(YYYYMM), ctgElbEls(합계/원금보장형 등), presCtg(발행실적/상환현황/미상환잔고), amt
-    - KPI: presCtg 기준 발행/상환 합계
-    - 바차트: 월별 발행 vs 상환
-    """
-    if els_df.empty:
-        return None, None
-
-    df = els_df.copy()
-    date_col = "basDt" if "basDt" in df.columns else "basYm"
-    pres_col = "presCtg" if "presCtg" in df.columns else None
-    ctg_col  = "ctgElbEls" if "ctgElbEls" in df.columns else None
-
-    df[date_col] = pd.to_datetime(
-        df[date_col].astype(str).str[:6], format="%Y%m", errors="coerce"
-    )
-    df["amt"] = pd.to_numeric(df["amt"], errors="coerce")
-
-    # 합계 행만 사용 (ctgElbEls == "합계")
-    if ctg_col:
-        df_total = df[df[ctg_col] == "합계"].copy()
+    # ── 상품별(tstCtg) 꺾은선: 합계 행 기준 ──────────────────────────
+    fig_line = None
+    if ctg_col and biz_col:
+        # 합계 업권 행에서 상품별 집계
+        df_total = df[df[biz_col] == "합계"].copy() if biz_col else df.copy()
         if df_total.empty:
             df_total = df.copy()
-    else:
-        df_total = df.copy()
 
-    # 최신 월 KPI
-    latest = df_total[date_col].max()
-    latest_df = df_total[df_total[date_col] == latest]
+        pivot_ctg = (df_total.groupby([date_col, ctg_col])["val"].sum()
+                             .reset_index().sort_values(date_col))
 
-    def get_amt_by_pres(keyword: str) -> float:
-        """presCtg에서 keyword 포함 행의 amt 합계"""
-        if pres_col is None:
-            return 0.0
-        mask = latest_df[pres_col].astype(str).str.contains(keyword, na=False)
-        return latest_df[mask]["amt"].sum() / 1e12
+        # 주요 상품 6개만 (금액 큰 순)
+        top_ctgs = (pivot_ctg.groupby(ctg_col)["val"].sum()
+                             .sort_values(ascending=False).head(6).index.tolist())
+        pivot_ctg = pivot_ctg[pivot_ctg[ctg_col].isin(top_ctgs)]
 
-    kpis = {
-        "발행":  get_amt_by_pres("발행"),
-        "상환":  get_amt_by_pres("상환"),
-        "잔고":  get_amt_by_pres("잔고"),
-    }
-
-    # 월별 발행 vs 상환 바차트
-    fig_bar = None
-    if pres_col:
-        # 발행실적 / 상환현황만 추출
-        df_plot = df_total[df_total[pres_col].isin(["발행실적", "상환현황"])].copy()
-        grp = (df_plot.groupby([date_col, pres_col])["amt"].sum()
-                      .reset_index().sort_values(date_col))
-
-        color_map = {"발행실적": "#2563EB", "상환현황": "#EF4444"}
-        label_map = {"발행실적": "발행", "상환현황": "상환"}
-
-        fig_bar = go.Figure()
-        for pres_val, sub in grp.groupby(pres_col):
-            fig_bar.add_trace(go.Bar(
-                x=sub[date_col],
-                y=(sub["amt"] / 1e12).round(2),
-                name=label_map.get(str(pres_val), str(pres_val)),
-                marker_color=color_map.get(str(pres_val), "#94A3B8"),
-                hovertemplate=f"{label_map.get(str(pres_val), pres_val)}: %{{y:.2f}}조<extra></extra>",
+        line_colors = ["#2563EB", "#0891B2", "#7C3AED", "#EA580C", "#059669", "#94A3B8"]
+        fig_line = go.Figure()
+        for i, ctg in enumerate(top_ctgs):
+            sub = pivot_ctg[pivot_ctg[ctg_col] == ctg].sort_values(date_col)
+            # 짧은 이름으로 legend 가독성 개선
+            short = str(ctg).replace("재산신탁 ", "").replace("금전신탁 ", "")[:10]
+            fig_line.add_trace(go.Scatter(
+                x=sub[date_col], y=(sub["val"] / 1e12).round(1),
+                name=short, mode="lines+markers",
+                line=dict(color=line_colors[i % len(line_colors)], width=2),
+                marker=dict(size=5),
+                hovertemplate=f"{short}: %{{y:.1f}}조<extra></extra>",
             ))
-        fig_bar.update_layout(
-            barmode="group", height=260,
-            margin=dict(l=0, r=0, t=10, b=0),
+        fig_line.update_layout(
+            height=260, margin=dict(l=0, r=0, t=10, b=0),
             plot_bgcolor=_WHITE, paper_bgcolor=_WHITE,
-            xaxis=dict(tickformat="%y/%m", gridcolor=_GRID),
+            xaxis=dict(tickformat="%y/%m", gridcolor=_GRID, dtick="M1"),
             yaxis=dict(gridcolor=_GRID, ticksuffix="조"),
-            legend=dict(orientation="h", y=1.1),
             hovermode="x unified",
+            legend=dict(orientation="h", y=1.15, font=dict(size=10)),
         )
 
+    # ── 업권별 도넛: 최신 월 ────────────────────────────────────────
+    fig_donut = None
+    if biz_col:
+        df_biz = df[~df[biz_col].isin(["합계", ""])].copy()
+        latest = df_biz[date_col].max()
+        latest_df = df_biz[df_biz[date_col] == latest].groupby(biz_col)["val"].sum()
+        if not latest_df.empty:
+            colors = [_BIZ_COLORS.get(b, "#94A3B8") for b in latest_df.index]
+            fig_donut = go.Figure(go.Pie(
+                labels=latest_df.index.tolist(),
+                values=(latest_df / 1e12).round(1).tolist(),
+                hole=0.5,
+                marker_colors=colors,
+                textinfo="label+percent",
+                textfont_size=11,
+            ))
+            fig_donut.update_layout(
+                height=260, margin=dict(l=0, r=0, t=10, b=10),
+                paper_bgcolor=_WHITE, showlegend=False,
+                annotations=[dict(
+                    text=f"{latest.strftime('%y/%m')}<br>기준",
+                    x=0.5, y=0.5, font_size=11, showarrow=False,
+                )],
+            )
+
+    return df, fig_line, fig_donut
+
+
+def _els_dls_charts(els_df: pd.DataFrame, dls_df: pd.DataFrame):
+    """
+    ELS + DLS 통합 시각화
+    ELS: ctgElbEls, presCtg(발행실적/상환현황/미상환잔고)
+    DLS: ctgDlbDls, presCtg(동일 구조)
+    - 합계 행(ctgElbEls/ctgDlbDls == "합계")만 사용
+    - 월별 발행 vs 상환 그룹 바차트
+    """
+    frames = []
+
+    def _prep(df, ctg_col, label):
+        if df.empty:
+            return pd.DataFrame()
+        d = df.copy()
+        d["_date"] = pd.to_datetime(
+            d["basDt"].astype(str).str[:6], format="%Y%m", errors="coerce")
+        d["amt"] = pd.to_numeric(d["amt"], errors="coerce")
+        d["_type"] = label
+        if ctg_col in d.columns:
+            d = d[d[ctg_col] == "합계"].copy()
+        return d[["_date", "_type", "presCtg", "amt"]].dropna(subset=["_date", "amt"])
+
+    els_prep = _prep(els_df, "ctgElbEls", "ELS")
+    dls_prep = _prep(dls_df, "ctgDlbDls", "DLS")
+    combined = pd.concat([els_prep, dls_prep], ignore_index=True)
+
+    if combined.empty:
+        return {}, None
+
+    # KPI: 최신 월 ELS 발행/상환/잔고
+    latest = combined["_date"].max()
+    latest_els = combined[(combined["_date"] == latest) & (combined["_type"] == "ELS")]
+
+    def get_amt(pres_kw):
+        mask = latest_els["presCtg"].astype(str).str.contains(pres_kw, na=False)
+        return latest_els[mask]["amt"].sum() / 1e12
+
+    kpis = {
+        "ELS 발행": get_amt("발행"),
+        "ELS 상환": get_amt("상환"),
+        "ELS 잔고": get_amt("잔고"),
+    }
+
+    # 발행 vs 상환 — ELS·DLS 각각 그룹 바
+    plot_df = combined[combined["presCtg"].isin(["발행실적", "상환현황"])].copy()
+    grp = (plot_df.groupby(["_date", "_type", "presCtg"])["amt"].sum()
+                  .reset_index().sort_values("_date"))
+
+    color_map = {
+        ("ELS", "발행실적"): "#2563EB",
+        ("ELS", "상환현황"): "#93C5FD",
+        ("DLS", "발행실적"): "#D97706",
+        ("DLS", "상환현황"): "#FDE68A",
+    }
+    label_map = {"발행실적": "발행", "상환현황": "상환"}
+
+    fig_bar = go.Figure()
+    for (tp, pres), sub in grp.groupby(["_type", "presCtg"]):
+        fig_bar.add_trace(go.Bar(
+            x=sub["_date"],
+            y=(sub["amt"] / 1e12).round(2),
+            name=f"{tp} {label_map.get(pres, pres)}",
+            marker_color=color_map.get((str(tp), str(pres)), "#94A3B8"),
+            hovertemplate=f"{tp} {label_map.get(pres,'')}: %{{y:.2f}}조<extra></extra>",
+        ))
+    fig_bar.update_layout(
+        barmode="group", height=260,
+        margin=dict(l=0, r=0, t=10, b=0),
+        plot_bgcolor=_WHITE, paper_bgcolor=_WHITE,
+        xaxis=dict(tickformat="%y/%m", gridcolor=_GRID, dtick="M1"),
+        yaxis=dict(gridcolor=_GRID, ticksuffix="조"),
+        legend=dict(orientation="h", y=1.1),
+        hovermode="x unified",
+    )
     return kpis, fig_bar
 
 
@@ -187,6 +184,7 @@ def render(data: dict) -> None:
     ia       = data.get("isa_assets", pd.DataFrame())
     trust_df = data.get("trust",      pd.DataFrame())
     els_df   = data.get("els",        pd.DataFrame())
+    dls_df   = data.get("dls",        pd.DataFrame())
 
     isa_last = it.iloc[-1].to_dict() if not it.empty else {}
 
@@ -195,28 +193,24 @@ def render(data: dict) -> None:
 
     tab_isa, tab_trust, tab_els = st.tabs(["🔷 투자중개형 ISA", "🏦 신탁", "📉 ELS/DLS"])
 
-    # ── ISA 탭 ───────────────────────────────────────────────────────
+    # ── ISA ─────────────────────────────────────────────────────────
     with tab_isa:
         st.caption("출처: ISA · getJoinStatus_V2 · getManagementStatus_V2")
         if not it.empty:
             c1, c2, c3 = st.columns(3)
             with c1:
                 st.metric("투자중개형 잔고",
-                    f"{fmt1(float(isa_last.get('잔고(조)', 0)))}조",
-                    f"전월 {sign(float(isa_last.get('순증(조)', 0)))}{fmt1(float(isa_last.get('순증(조)', 0)))}조")
+                    f"{fmt1(float(isa_last.get('잔고(조)',0)))}조",
+                    f"전월 {sign(float(isa_last.get('순증(조)',0)))}{fmt1(float(isa_last.get('순증(조)',0)))}조")
             with c2:
-                st.metric("가입자", f"{fmt1(float(isa_last.get('가입자(만명)', 0)))}만명")
+                st.metric("가입자", f"{fmt1(float(isa_last.get('가입자(만명)',0)))}만명")
             with c3:
                 st.metric("ETF+주식 비중", "82%", "직접투자 압도적")
-
             bar_colors = ["#DC2626" if v >= 5 else "#EA580C" if v >= 3 else "#2563EB"
                           for v in it["순증(조)"].fillna(0)]
-            fig = make_dual_axis(
-                it, "basDt", "순증(조)", bar_colors,
-                "basDt", "잔고(조)",
-                bar_name="순증(조)", line_name="잔고(조)",
-                line_color="#D97706", height=220,
-            )
+            fig = make_dual_axis(it, "basDt", "순증(조)", bar_colors,
+                                 "basDt", "잔고(조)", bar_name="순증(조)",
+                                 line_name="잔고(조)", line_color="#D97706", height=220)
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("ISA 데이터 로드 중...")
@@ -224,135 +218,101 @@ def render(data: dict) -> None:
         if not ia.empty:
             st.markdown("**편입자산 시계열 (%)**")
             fig2 = go.Figure()
-            col_map = {
+            for col_name, (color, display) in {
                 "ETF 등 상장펀드": ("#2563EB", "ETF"),
                 "주식":            ("#0891B2", "주식"),
                 "예적금 등":       ("#94A3B8", "예적금"),
                 "RP":              ("#EA580C", "RP"),
                 "파생결합증권":    ("#7C3AED", "파생"),
-            }
-            for col_name, (color, display) in col_map.items():
+            }.items():
                 if col_name in ia.columns:
                     fig2.add_trace(go.Scatter(
-                        x=ia["basDt"], y=ia[col_name],
-                        name=display, line=dict(color=color, width=2),
+                        x=ia["basDt"], y=ia[col_name], name=display,
+                        line=dict(color=color, width=2),
                         mode="lines+markers", marker=dict(size=4),
                     ))
-            fig2.update_layout(
-                height=220, margin=dict(l=0, r=0, t=10, b=0),
-                plot_bgcolor=_WHITE, paper_bgcolor=_WHITE,
-                xaxis=dict(tickformat="%y/%m", tickangle=0),
-                yaxis=dict(gridcolor=_GRID, ticksuffix="%"),
-                legend=dict(orientation="h", y=1.1),
-            )
+            fig2.update_layout(height=220, margin=dict(l=0, r=0, t=10, b=0),
+                               plot_bgcolor=_WHITE, paper_bgcolor=_WHITE,
+                               xaxis=dict(tickformat="%y/%m"),
+                               yaxis=dict(gridcolor=_GRID, ticksuffix="%"),
+                               legend=dict(orientation="h", y=1.1))
             st.plotly_chart(fig2, use_container_width=True)
 
-    # ── 신탁 탭 ──────────────────────────────────────────────────────
+    # ── 신탁 ────────────────────────────────────────────────────────
     with tab_trust:
-        st.caption("출처: KOFIA-M · getTrustScaleInfo · 월 1회 갱신")
+        st.caption("출처: KOFIA-M · getTrustScaleInfo · 월 1회 갱신 · 5개월치")
         if not trust_df.empty:
-            pivot, fig_line, fig_donut = _trust_charts(trust_df)
+            df_trust, fig_line, fig_donut = _trust_charts(trust_df)
 
             # 업권별 KPI 카드
-            if pivot is not None and not pivot.empty:
-                biz_col = "bzds" if "bzds" in trust_df.columns else None
-                date_col = "basYm" if "basYm" in trust_df.columns else "basDt"
-                if biz_col:
-                    tmp = trust_df.copy()
-                    tmp["_dt"] = pd.to_datetime(
-                        tmp[date_col].astype(str).str[:6], format="%Y%m", errors="coerce"
-                    )
-                    tmp["val"] = pd.to_numeric(tmp["val"], errors="coerce")
-                    # 수탁총액 기준
-                    if "iqBs" in tmp.columns:
-                        tmp = tmp[tmp["iqBs"] == "수탁총액"]
-                    latest_m = tmp["_dt"].max()
-                    latest_t = tmp[(tmp["_dt"] == latest_m) & (~tmp[biz_col].isin(["합계", ""]))]
+            if df_trust is not None and "bzds" in trust_df.columns and "iqBs" in trust_df.columns:
+                tmp = trust_df.copy()
+                tmp["_dt"] = pd.to_datetime(tmp["basYm" if "basYm" in tmp.columns else "basDt"]
+                                            .astype(str).str[:6], format="%Y%m", errors="coerce")
+                tmp["val"] = pd.to_numeric(tmp["val"], errors="coerce")
+                tmp = tmp[tmp["iqBs"] == "수탁총액"]
+                latest_m = tmp["_dt"].max()
+                latest_t = tmp[(tmp["_dt"] == latest_m) & (~tmp["bzds"].isin(["합계", ""]))]
+                biz_vals = {biz: round(latest_t[latest_t["bzds"] == biz]["val"].sum() / 1e12, 1)
+                            for biz in ["증권", "은행", "보험", "부동산"]}
+                kpi_cols = st.columns(4)
+                for col, (biz, val) in zip(kpi_cols, biz_vals.items()):
+                    color = _BIZ_COLORS.get(biz, "#94A3B8")
+                    with col:
+                        st.markdown(f"""
+                        <div class="kpi-card" style="border-top:3px solid {color};">
+                          <div class="kpi-label">{biz} 신탁</div>
+                          <div class="kpi-value" style="color:{color};">{val}조</div>
+                        </div>""", unsafe_allow_html=True)
+                st.markdown("")
 
-                    biz_vals = {}
-                    for biz in ["증권", "은행", "보험", "부동산"]:
-                        sub = latest_t[latest_t[biz_col] == biz]["val"].sum()
-                        biz_vals[biz] = round(sub / 1e12, 1)
-
-                    kpi_cols = st.columns(4)
-                    for col, (biz, val) in zip(kpi_cols, biz_vals.items()):
-                        color = _BIZ_COLORS.get(biz, "#94A3B8")
-                        with col:
-                            st.markdown(f"""
-                            <div class="kpi-card" style="border-top:3px solid {color};">
-                              <div class="kpi-label">{biz} 신탁</div>
-                              <div class="kpi-value" style="color:{color};">{val}조</div>
-                            </div>""", unsafe_allow_html=True)
-                    st.markdown("")
-
-            # 업권별 꺾은선 + 도넛 나란히
             ca, cb = st.columns([2, 1])
             with ca:
                 if fig_line:
-                    st.markdown("**업권별 수탁총액 추이**")
+                    st.markdown("**상품별 수탁총액 추이** <span style='font-size:11px;color:#94A3B8;'>상위 6개 상품</span>",
+                                unsafe_allow_html=True)
                     st.plotly_chart(fig_line, use_container_width=True)
             with cb:
                 if fig_donut:
-                    st.markdown("**유형별 구성**")
+                    st.markdown("**업권별 구성**")
                     st.plotly_chart(fig_donut, use_container_width=True)
         else:
             st.info("KOFIA 서버 복구 후 자동 수집됩니다.")
 
-    # ── ELS/DLS 탭 ───────────────────────────────────────────────────
+    # ── ELS/DLS ──────────────────────────────────────────────────────
     with tab_els:
-        st.caption("출처: KOFIA-M · getELSAndELBInfo · 월 1회 갱신")
-        if not els_df.empty:
-            kpis, fig_els_bar = _els_charts(els_df)
+        st.caption("출처: KOFIA-M · getELSAndELBInfo · getDLSAndDLBInfo · 월 1회 갱신")
+        has_data = not els_df.empty or not dls_df.empty
+        if has_data:
+            kpis, fig_bar = _els_dls_charts(els_df, dls_df)
 
-            # KPI 카드 3개 (발행/상환/잔고)
+            # KPI 카드
             if kpis:
-                kpi_styles = [
-                    ("발행", "#2563EB"), ("상환", "#EF4444"), ("잔고", "#7C3AED"),
-                ]
+                kpi_styles = [("ELS 발행","#2563EB"), ("ELS 상환","#EF4444"), ("ELS 잔고","#7C3AED")]
                 kpi_cols = st.columns(3)
                 for col, (label, color) in zip(kpi_cols, kpi_styles):
                     val = kpis.get(label, 0)
                     with col:
                         st.markdown(f"""
                         <div class="kpi-card" style="border-top:3px solid {color};">
-                          <div class="kpi-label">ELS {label}</div>
+                          <div class="kpi-label">{label}</div>
                           <div class="kpi-value" style="color:{color};">{val:.2f}조</div>
                         </div>""", unsafe_allow_html=True)
                 st.markdown("")
 
-            if fig_els_bar:
-                st.markdown("**발행 VS 상환 월별 추이**")
-                st.plotly_chart(fig_els_bar, use_container_width=True)
+            if fig_bar:
+                st.markdown("**ELS·DLS 발행 VS 상환 월별 추이**")
+                st.plotly_chart(fig_bar, use_container_width=True)
         else:
-            # 폴백 정적 데이터
-            kpi_styles = [
-                ("ELS 발행", "#2563EB", 3.33, "+0.03조"),
-                ("ELS 상환", "#EF4444", 3.28, "발행=상환 균형"),
-                ("DLS 발행", "#F59E0B", 0.28, "전월 대비 감소"),
-                ("DLS 상환", "#F97316", 2.87, "발행의 10배 ↑"),
-            ]
-            kpi_cols = st.columns(4)
-            for col, (label, color, val, sub) in zip(kpi_cols, kpi_styles):
-                with col:
-                    st.markdown(f"""
-                    <div class="kpi-card" style="border-top:3px solid {color};">
-                      <div class="kpi-label">{label}</div>
-                      <div class="kpi-value" style="color:{color};">{val:.2f}조</div>
-                      <div class="kpi-sub">{sub}</div>
-                    </div>""", unsafe_allow_html=True)
-            st.markdown("")
-            df_fb = pd.DataFrame({
-                "구분": ["ELS 발행", "ELS 상환", "DLS 발행", "DLS 상환"],
-                "금액(조)": [3.33, 3.28, 0.28, 2.87],
-            })
-            fig_fb = go.Figure(go.Bar(
-                x=df_fb["구분"], y=df_fb["금액(조)"],
-                marker_color=["#2563EB", "#EF4444", "#F59E0B", "#F97316"],
-            ))
-            fig_fb.update_layout(height=200, margin=dict(l=0, r=0, t=10, b=0),
+            # 폴백
+            st.info("KOFIA 서버 복구 후 자동 수집됩니다.")
+            df_fb = pd.DataFrame({"구분":["ELS 발행","ELS 상환","DLS 발행","DLS 상환"],
+                                   "금액(조)":[3.33,3.28,0.28,2.87]})
+            fig_fb = go.Figure(go.Bar(x=df_fb["구분"], y=df_fb["금액(조)"],
+                                      marker_color=["#2563EB","#EF4444","#D97706","#FDE68A"]))
+            fig_fb.update_layout(height=200, margin=dict(l=0,r=0,t=10,b=0),
                                  plot_bgcolor=_WHITE, paper_bgcolor=_WHITE,
                                  yaxis=dict(gridcolor=_GRID, ticksuffix="조"))
-            st.markdown("**발행 VS 상환 (최근 기준)**")
             st.plotly_chart(fig_fb, use_container_width=True)
             st.caption("※ KOFIA 서버 복구 후 자동 수집 예정")
 
