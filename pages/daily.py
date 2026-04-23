@@ -12,13 +12,15 @@ from utils import sign, fmt1
 
 
 def render(data: dict) -> None:
-    mf    = data.get("market_funds",  pd.DataFrame())
-    cr    = data.get("credit",        pd.DataFrame())
-    fn    = data.get("fund_nav",      pd.DataFrame())
-    idx   = data.get("indices",       {})
-    etf   = data.get("etf_top10",     pd.DataFrame())
-    bond  = data.get("bond_market",   pd.DataFrame())
-    gold  = data.get("gold",          {})
+    mf           = data.get("market_funds",  pd.DataFrame())
+    cr           = data.get("credit",        pd.DataFrame())
+    fn           = data.get("fund_nav",      pd.DataFrame())
+    idx          = data.get("indices",       {})
+    etf          = data.get("etf_top10",     pd.DataFrame())
+    bond         = data.get("bond_market",   pd.DataFrame())
+    bond_hist    = data.get("bond_history",  pd.DataFrame())
+    gold         = data.get("gold",          {})
+    gold_hist    = data.get("gold_history",  pd.DataFrame())
 
     mf_last = mf.iloc[-1].to_dict() if not mf.empty else {}
     mf_prev = mf.iloc[-2].to_dict() if len(mf) > 1  else {}
@@ -136,33 +138,64 @@ def render(data: dict) -> None:
     else:
         st.warning("📭 KRX ETF 데이터 없음 — 영업일이 아니거나 API 키를 확인해 주세요.")
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("### 채권 거래 현황 `KRX-BON`")
-        if not bond.empty:
-            fig = go.Figure(go.Bar(
-                x=bond["유형"], y=bond["거래대금(억)"],
-                marker_color=["#2563EB", "#7C3AED", "#0891B2", "#059669", "#94A3B8"][:len(bond)],
+    # ── 채권 거래 현황 (시계열 + 스냅샷) ──
+    st.markdown("### 채권 거래 현황 `KRX-BON`")
+    if not bond_hist.empty:
+        # 유형별 라인 시계열
+        fig_bh = go.Figure()
+        bond_colors = {"국민주택채권": "#2563EB", "금융채": "#7C3AED",
+                       "특수채": "#0891B2", "기타": "#94A3B8"}
+        for 유형, grp in bond_hist.groupby("유형"):
+            grp = grp.sort_values("date")
+            fig_bh.add_trace(go.Scatter(
+                x=grp["date"], y=grp["거래대금(억)"],
+                name=str(유형), mode="lines+markers",
+                line=dict(color=bond_colors.get(str(유형), "#94A3B8"), width=2),
+                marker=dict(size=4),
             ))
-            fig.update_layout(height=200, margin=dict(l=0, r=0, t=10, b=0),
-                              plot_bgcolor="#fff", paper_bgcolor="#fff",
-                              yaxis=dict(gridcolor="#F1F5F9", ticksuffix="억"))
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.warning("📭 채권 거래 데이터 없음 — 영업일이 아니거나 API 키를 확인해 주세요.")
+        fig_bh.update_layout(height=220, margin=dict(l=0, r=0, t=10, b=0),
+                             plot_bgcolor="#fff", paper_bgcolor="#fff",
+                             xaxis=dict(tickformat="%m/%d", gridcolor="#F1F5F9"),
+                             yaxis=dict(gridcolor="#F1F5F9", ticksuffix="억"),
+                             legend=dict(orientation="h", y=1.1))
+        st.plotly_chart(fig_bh, use_container_width=True)
+    elif not bond.empty:
+        fig = go.Figure(go.Bar(
+            x=bond["유형"], y=bond["거래대금(억)"],
+            marker_color=["#2563EB", "#7C3AED", "#0891B2", "#059669", "#94A3B8"][:len(bond)],
+        ))
+        fig.update_layout(height=200, margin=dict(l=0, r=0, t=10, b=0),
+                          plot_bgcolor="#fff", paper_bgcolor="#fff",
+                          yaxis=dict(gridcolor="#F1F5F9", ticksuffix="억"))
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("📭 채권 거래 데이터 없음 — 영업일이 아니거나 API 키를 확인해 주세요.")
 
-    with c2:
-        st.markdown("### 금 시세 `KRX-GLD`")
-        if gold:
-            c_a, c_b = st.columns(2)
-            with c_a:
-                st.metric("종가", f"{int(gold.get('price', 0)):,}원/g",
-                          f"{sign(gold.get('chg', 0))}{int(gold.get('chg', 0)):,}원")
-            with c_b:
-                st.metric("등락률", f"{gold.get('fluc', 0):.2f}%")
+    # ── 금 시세 (시계열 + 현재값) ──
+    st.markdown("### 금 시세 `KRX-GLD`")
+    if gold:
+        c_a, c_b, c_c = st.columns(3)
+        with c_a:
+            st.metric("종가", f"{int(gold.get('price', 0)):,}원/g",
+                      f"{sign(gold.get('chg', 0))}{int(gold.get('chg', 0)):,}원")
+        with c_b:
+            st.metric("등락률", f"{gold.get('fluc', 0):.2f}%")
+        with c_c:
             st.metric("거래대금", f"{gold.get('val', 0):.1f}억원")
-        else:
-            st.warning("📭 금 시세 데이터 없음 — 영업일이 아니거나 API 키를 확인해 주세요.")
+    if not gold_hist.empty:
+        fig_gh = go.Figure()
+        fig_gh.add_trace(go.Scatter(
+            x=gold_hist["date"], y=gold_hist["price"],
+            mode="lines+markers", name="종가(원/g)",
+            line=dict(color="#D97706", width=2), marker=dict(size=4),
+        ))
+        fig_gh.update_layout(height=200, margin=dict(l=0, r=0, t=10, b=0),
+                             plot_bgcolor="#fff", paper_bgcolor="#fff",
+                             xaxis=dict(tickformat="%m/%d", gridcolor="#F1F5F9"),
+                             yaxis=dict(gridcolor="#F1F5F9", ticksuffix="원"))
+        st.plotly_chart(fig_gh, use_container_width=True)
+    elif not gold:
+        st.warning("📭 금 시세 데이터 없음 — 영업일이 아니거나 API 키를 확인해 주세요.")
 
     st.divider()
 

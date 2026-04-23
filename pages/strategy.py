@@ -11,30 +11,67 @@ from utils import sign, fmt1
 
 
 def _build_daily_comment(data: dict) -> str:
-    """수집 데이터를 바탕으로 100자 이내 데일리 코멘트 자동 생성"""
+    """수집 데이터를 바탕으로 300자 이내 문장형 데일리 코멘트 자동 생성"""
     mf  = data.get("market_funds", pd.DataFrame())
     cr  = data.get("credit",       pd.DataFrame())
     idx = data.get("indices",      {})
     it  = data.get("isa_trend",    pd.DataFrame())
+    fn  = data.get("fund_nav",     pd.DataFrame())
 
-    mf_val   = float(mf.iloc[-1].get("합계", 0))  if not mf.empty else 0
+    mf_val   = float(mf.iloc[-1].get("합계", 0))    if not mf.empty else 0
+    mf_prev  = float(mf.iloc[-2].get("합계", 0))    if len(mf) > 1  else mf_val
     cr_val   = float(cr.iloc[-1].get("신용융자", 0)) if not cr.empty else 0
-    vix_val  = idx.get("VIX", {}).get("last", 0)
+    vix_val  = idx.get("VIX",   {}).get("last", 0)
+    vix_pct  = idx.get("VIX",   {}).get("pct",  0)
+    kospi    = idx.get("KOSPI", {}).get("last",  0)
     isa_inc  = float(it.iloc[-1].get("순증(조)", 0)) if not it.empty else 0
 
-    today = datetime.today().strftime("%m/%d")
+    mf_flow  = round(mf_val - mf_prev, 1)
+    today    = datetime.today().strftime("%Y년 %m월 %d일")
 
-    # 시나리오별 코멘트 (우선순위 순)
+    # 주식형 펀드 주간 플로우
+    eq_wflow = 0.0
+    if not fn.empty:
+        eq = fn[fn["ctg"] == "주식형"].sort_values("basDt")
+        if len(eq) >= 6:
+            eq_wflow = round((eq["nPptTotAmt"].iloc[-1] - eq["nPptTotAmt"].iloc[-6]) / 1e12, 1)
+
+    # 시나리오별 300자 문장형 코멘트
     if vix_val > 25:
-        return f"[{today}] VIX {vix_val:.0f} 급등. 대기자금 {mf_val:.0f}조 유지 중 — 변동성 장세, 단기 ETF·현금 비중 확대 권고."
+        return (
+            f"{today} 기준, VIX가 {vix_val:.1f}로 급등하며 글로벌 변동성이 고조되고 있습니다. "
+            f"증시 대기자금은 {mf_val:.0f}조원 수준을 유지 중이나 신용융자 {cr_val:.1f}조원으로 "
+            f"레버리지 포지션이 혼재합니다. 변동성 장세에서는 단기 ETF 및 현금성 자산 비중을 확대하고, "
+            f"원금보장형 상품 중심의 포트폴리오 리밸런싱을 고객에게 적극 제안하는 것이 유효합니다."
+        )
     if mf_val > 650:
-        return f"[{today}] 대기자금 {mf_val:.0f}조 역대급. 신용융자 {cr_val:.1f}조 — 유입 대기 수요 강, 주식형·ISA 신규 유치 적기."
+        return (
+            f"{today} 기준, 증시 대기자금(예탁금·RP·CMA·MMF 합계)이 {mf_val:.0f}조원으로 "
+            f"역대급 수준을 기록 중이며 전일 대비 {'+' if mf_flow >= 0 else ''}{mf_flow:.1f}조원 변동했습니다. "
+            f"신용융자 {cr_val:.1f}조원, 주식형 펀드 주간 유입 {'+' if eq_wflow >= 0 else ''}{eq_wflow:.1f}조원으로 "
+            f"위험자산 선호가 확인됩니다. 주식형·ISA 투자중개형 신규 유치 캠페인의 적기로 판단됩니다."
+        )
     if cr_val > 36:
-        return f"[{today}] 신용융자 {cr_val:.1f}조 고점권. 레버리지 과열 신호 — 원금보장형·채권ETF 리밸런싱 제안 시점."
+        return (
+            f"{today} 기준, 신용융자 잔고가 {cr_val:.1f}조원으로 고점권에 근접했습니다. "
+            f"레버리지 과열 신호가 감지되는 만큼 신규 유입 자금의 리스크 관리가 필요한 시점입니다. "
+            f"KOSPI {kospi:,.0f}pt, VIX {vix_val:.1f} 수준에서 채권형 ETF 또는 원금보장형 상품으로의 "
+            f"리밸런싱을 고객에게 먼저 제안하는 선제적 대응이 권고됩니다."
+        )
     if isa_inc > 5:
-        return f"[{today}] ISA 투자중개형 전월 +{isa_inc:.1f}조 유입. ETF 직접투자 선호 확대 — ISA 연계 ETF MP 캠페인 추진."
+        return (
+            f"{today} 기준, ISA 투자중개형 잔고가 전월 대비 +{isa_inc:.1f}조원 증가하며 구조적 성장세를 이어가고 있습니다. "
+            f"ETF·주식 직접투자 비중이 80%를 상회하는 흐름 속에서, "
+            f"증시 대기자금 {mf_val:.0f}조원의 절세 수요를 ISA로 연결하는 ETF 연계 MP 캠페인이 "
+            f"가장 효과적인 접점 전략으로 분석됩니다."
+        )
     # 기본 코멘트
-    return f"[{today}] 대기자금 {mf_val:.0f}조·융자 {cr_val:.1f}조 안정권. 주식형 플로우 모니터링 지속 — 방향성 확인 후 액션."
+    return (
+        f"{today} 기준, 증시 대기자금 {mf_val:.0f}조원·신용융자 {cr_val:.1f}조원으로 전반적으로 안정권에 있습니다. "
+        f"KOSPI {kospi:,.0f}pt, VIX {vix_val:.1f} 수준에서 방향성이 뚜렷하지 않은 만큼 "
+        f"주식형 펀드 플로우({'+' if eq_wflow >= 0 else ''}{eq_wflow:.1f}조 주간)와 "
+        f"외국인 수급 동향을 추가 확인한 뒤 액션 타이밍을 결정하는 것이 바람직합니다."
+    )
 
 
 def render(data: dict) -> None:
@@ -98,7 +135,7 @@ def render(data: dict) -> None:
     <div style="background:#F8FAFC;border:1px solid #CBD5E1;border-left:4px solid #2563EB;
       border-radius:8px;padding:12px 16px;margin-top:16px;">
       <span style="font-size:10px;color:#94A3B8;font-weight:700;letter-spacing:0.08em;">📝 DAILY COMMENT</span><br/>
-      <span style="color:#1E293B;font-size:13px;line-height:1.7;">{comment}</span>
+      <span style="color:#1E293B;font-size:13px;line-height:1.8;white-space:pre-line;">{comment}</span>
     </div>
     """, unsafe_allow_html=True)
 
