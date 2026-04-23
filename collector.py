@@ -164,10 +164,11 @@ def get_fund_nav(keys: ApiKeys) -> pd.DataFrame:
 
 
 def get_market_funds(keys: ApiKeys) -> pd.DataFrame:
-    """[KOFIA-D] 증시 대기자금 합산 — 확인된 컬럼명 사용 + 날짜 gap 보간"""
-    # 컬럼 확인됨: basDt, invrDpsgAmt, toCstRpchCndBndSlgBal
+    """[KOFIA-D] 증시 대기자금 합산
+    - 4개 항목(예탁금/RP/CMA/MMF) 모두 있는 날짜만 합계 표시
+    - 호버 시 세부 구성 확인 가능하도록 항목별 컬럼 유지
+    """
     df_dep  = _kofia_get(keys, "getSecuritiesMarketTotalCapitalInfo")
-    # 컬럼 확인됨: basDt, mngInvTgt, actBal
     df_cma  = _kofia_get(keys, "getCMAStatus")
     df_fund = get_fund_nav(keys)
     result: dict = {}
@@ -185,7 +186,6 @@ def get_market_funds(keys: ApiKeys) -> pd.DataFrame:
     if not df_cma.empty:
         df_cma["actBal"] = pd.to_numeric(df_cma["actBal"], errors="coerce")
         df_cma["basDt"]  = pd.to_datetime(df_cma["basDt"], format="%Y%m%d", errors="coerce")
-        # mngInvTgt == "합계" 행만 사용 (기관+개인 이중 집계 방지)
         df_cma = df_cma[df_cma["mngInvTgt"] == "합계"]
         cma_daily = df_cma.groupby("basDt")["actBal"].sum()
         for dt, val in cma_daily.items():
@@ -202,16 +202,20 @@ def get_market_funds(keys: ApiKeys) -> pd.DataFrame:
         return pd.DataFrame()
 
     df_out = pd.DataFrame(result).T.sort_index()
-    for col in ["예탁금", "RP", "CMA", "MMF"]:
-        if col not in df_out.columns:
-            df_out[col] = 0
 
-    # 영업일 기준 날짜 gap forward-fill
+    # 영업일 기준 날짜 gap forward-fill (각 항목 독립적으로)
     df_out.index = pd.to_datetime(df_out.index)
     biz_idx = pd.bdate_range(df_out.index.min(), df_out.index.max())
     df_out = df_out.reindex(biz_idx).ffill()
 
-    df_out["합계"] = df_out[["예탁금", "RP", "CMA", "MMF"]].sum(axis=1).round(1)
+    # 합계: 4개 항목 모두 존재하는 날짜만 계산 (일부 누락 날짜는 NaN → 그래프 공백)
+    cols = ["예탁금", "RP", "CMA", "MMF"]
+    for col in cols:
+        if col not in df_out.columns:
+            df_out[col] = pd.NA
+    all_present = df_out[cols].notna().all(axis=1)
+    df_out["합계"] = df_out[cols].sum(axis=1).where(all_present).round(1)
+
     return df_out.reset_index().rename(columns={"index": "basDt"})
 
 
