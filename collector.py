@@ -350,11 +350,13 @@ def _krx_range(keys: ApiKeys, endpoint: str, days_back: int = 30) -> pd.DataFram
 
 
 def get_bond_market(keys: ApiKeys) -> pd.DataFrame:
-    """[KRX-BON] 채권 거래 유형별 집계 — 당일 스냅샷 (최대 3일 소급)"""
+    """[KRX-BON] 채권 당일 스냅샷 — 종목 단위 원본 + 유형 분류 (최대 5일 소급)
+    ISU_NM: 실제 채권 종목명 (예: 국고01500-5003(20-2), 한국캐피탈563-1)
+    """
     from datetime import datetime, timedelta
     df = pd.DataFrame()
     d = datetime.strptime(last_bizday(), "%Y%m%d")
-    for _ in range(3):
+    for _ in range(5):
         df = _krx_post(keys, "bon/bnd_bydd_trd", d.strftime("%Y%m%d"))
         if not df.empty:
             break
@@ -363,12 +365,10 @@ def get_bond_market(keys: ApiKeys) -> pd.DataFrame:
             d -= timedelta(days=1)
     if df.empty:
         return df
-    df["ACC_TRDVAL"] = pd.to_numeric(df.get("ACC_TRDVAL", pd.Series(dtype=float)), errors="coerce")
+    df["ACC_TRDVAL"] = pd.to_numeric(df["ACC_TRDVAL"], errors="coerce")
     df["유형"] = df["ISU_NM"].apply(_classify_bond)
-    result = (df.groupby("유형")["ACC_TRDVAL"].sum()
-                .reset_index().sort_values("ACC_TRDVAL", ascending=False))
-    result["거래대금(억)"] = (result["ACC_TRDVAL"] / 1e8).round(1)
-    return result
+    df["거래대금(억)"] = (df["ACC_TRDVAL"] / 1e8).round(1)
+    return df.dropna(subset=["ACC_TRDVAL"]).sort_values("ACC_TRDVAL", ascending=False)
 
 
 def get_bond_history(keys: ApiKeys, days_back: int = 30) -> pd.DataFrame:
@@ -435,18 +435,18 @@ def get_gold_history(keys: ApiKeys, days_back: int = 30) -> pd.DataFrame:
 # ══════════════════════════════════════════════════════════════
 
 def get_trust(keys: ApiKeys) -> pd.DataFrame:
-    """[KOFIA-M] 신탁 상품별 수탁총액 — 5개월치, tstCtg(상품구분) 포함"""
+    """[KOFIA-M] 신탁 상품별 수탁총액 — 12개월 요청(API 제공 범위 최대 확보)"""
     return _kofia_get(keys, "getTrustScaleInfo", {
-        "beginBasDt": months_ago_str(5),
+        "beginBasDt": months_ago_str(12),
         "endBasDt":   today_str(),
         "numOfRows":  "2000",
     })
 
 
 def get_els(keys: ApiKeys) -> pd.DataFrame:
-    """[KOFIA-M] ELS/ELB 발행·상환 (합계 행 기준, 5개월치)"""
+    """[KOFIA-M] ELS/ELB 발행·상환 — 12개월 요청(API 제공 범위 최대 확보)"""
     df = _kofia_get(keys, "getELSAndELBInfo", {
-        "beginBasDt": months_ago_str(5),
+        "beginBasDt": months_ago_str(12),
         "endBasDt":   today_str(),
         "numOfRows":  "500",
     })
@@ -458,11 +458,11 @@ def get_els(keys: ApiKeys) -> pd.DataFrame:
 
 
 def get_dls(keys: ApiKeys) -> pd.DataFrame:
-    """[KOFIA-M] DLS/DLB 발행·상환 (합계 행 기준, 5개월치)
+    """[KOFIA-M] DLS/DLB 발행·상환 — 12개월 요청(API 제공 범위 최대 확보)
     ELS와 별도 엔드포인트, 컬럼명 ctgDlbDls 사용
     """
     df = _kofia_get(keys, "getDLSAndDLBInfo", {
-        "beginBasDt": months_ago_str(5),
+        "beginBasDt": months_ago_str(12),
         "endBasDt":   today_str(),
         "numOfRows":  "500",
     })
