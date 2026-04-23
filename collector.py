@@ -22,8 +22,8 @@ KOFIA_KEY = ""
 KRX_KEY   = ""
 ECOS_KEY  = ""
 
-BASE_KOFIA = "https://apis.data.go.kr/1160100/GetKofiaStatisticsInfoService"
-BASE_ISA   = "https://apis.data.go.kr/1160100/GetISAInfoService_V2"
+BASE_KOFIA = "https://apis.data.go.kr/1160100/service/GetKofiaStatisticsInfoService"
+BASE_ISA   = "https://apis.data.go.kr/1160100/service/GetISAInfoService_V2"
 BASE_ECOS  = "https://ecos.bok.or.kr/api/StatisticSearch"
 BASE_KRX   = "https://data-dbg.krx.co.kr/svc/apis"
 
