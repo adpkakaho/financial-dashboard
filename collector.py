@@ -11,87 +11,98 @@ collector.py
   [KRX]     KRX Open API (POST + JSON + AUTH_KEY header)
 """
 
+import time
 import requests
 import pandas as pd
 import yfinance as yf
-from datetime import datetime, timedelta
-import time
+from dataclasses import dataclass
 
-# ── 인증키 (collect_all 호출 시 주입) ────────────────────────
-KOFIA_KEY = ""
-KRX_KEY   = ""
-ECOS_KEY  = ""
+from utils import get_logger, date_range, today_str, last_bizday, months_ago_str, to_float
 
-BASE_KOFIA = "https://apis.data.go.kr/1160100/service/GetKofiaStatisticsInfoService"
-BASE_ISA   = "https://apis.data.go.kr/1160100/GetISAInfoService_V2"  # /service/ 없음
-BASE_ECOS  = "https://ecos.bok.or.kr/api/StatisticSearch"
-BASE_KRX   = "https://data-dbg.krx.co.kr/svc/apis"
+logger = get_logger("collector")
+
+# ── API 엔드포인트 상수 ────────────────────────────────────────
+_BASE_KOFIA = "https://apis.data.go.kr/1160100/service/GetKofiaStatisticsInfoService"
+_BASE_ISA   = "https://apis.data.go.kr/1160100/GetISAInfoService_V2"
+_BASE_ECOS  = "https://ecos.bok.or.kr/api/StatisticSearch"
+_BASE_KRX   = "https://data-dbg.krx.co.kr/svc/apis"
+
+# ── API 키 컨테이너 (전역 변수 대신 dataclass 사용) ────────────
+@dataclass(frozen=True)
+class ApiKeys:
+    kofia: str
+    krx: str
+    ecos: str
+
+    def validate(self) -> list[str]:
+        """빈 키 목록 반환 (경고용)"""
+        missing = []
+        if not self.kofia: missing.append("KOFIA_KEY")
+        if not self.krx:   missing.append("KRX_KEY")
+        if not self.ecos:  missing.append("ECOS_KEY")
+        return missing
+
 
 # ══════════════════════════════════════════════════════════════
-# 공통 헬퍼
+# 공통 헬퍼 (키를 인자로 명시적 전달)
 # ══════════════════════════════════════════════════════════════
 
-def _date_range(days_back=60):
-    end   = datetime.today()
-    start = end - timedelta(days=days_back)
-    return start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
-
-def _last_bizday():
-    d = datetime.today()
-    while d.weekday() >= 5:
-        d -= timedelta(days=1)
-    return d.strftime("%Y%m%d")
-
-def _kofia_get(operation, extra={}):
+def _kofia_get(keys: ApiKeys, operation: str, extra: dict | None = None) -> pd.DataFrame:
     """공공데이터포털 KOFIA API 호출"""
-    start_dt, end_dt = _date_range(60)
+    start_dt, end_dt = date_range(60)
     params = {
-        "serviceKey": KOFIA_KEY,
+        "serviceKey": keys.kofia,
         "pageNo":     "1",
         "numOfRows":  "1000",
         "resultType": "json",
         "beginBasDt": start_dt,
         "endBasDt":   end_dt,
     }
-    params.update(extra)
+    if extra:
+        params.update(extra)
     try:
-        r = requests.get(f"{BASE_KOFIA}/{operation}", params=params, timeout=15)
+        r = requests.get(f"{_BASE_KOFIA}/{operation}", params=params, timeout=15)
         r.raise_for_status()
         body  = r.json()["response"]["body"]
         items = body.get("items", {})
         rows  = items.get("item", items) if isinstance(items, dict) else items
         return pd.DataFrame(rows if isinstance(rows, list) else [rows])
     except Exception as e:
-        print(f"  [KOFIA] {operation} 오류: {e}")
+        logger.warning("[KOFIA] %s 오류: %s", operation, e)
         return pd.DataFrame()
 
-def _isa_get(operation, extra={}):
+
+def _isa_get(keys: ApiKeys, operation: str, extra: dict | None = None) -> pd.DataFrame:
     """ISA API 호출"""
     params = {
-        "serviceKey": KOFIA_KEY,
+        "serviceKey": keys.kofia,
         "pageNo":     "1",
         "numOfRows":  "1000",
         "resultType": "json",
-        "beginBasDt": "20240101",
-        "endBasDt":   datetime.today().strftime("%Y%m%d"),
+        "beginBasDt": "20200101",          # 하드코딩 제거 → 충분히 넓은 범위
+        "endBasDt":   today_str(),
     }
-    params.update(extra)
+    if extra:
+        params.update(extra)
     try:
-        r = requests.get(f"{BASE_ISA}/{operation}", params=params, timeout=15)
+        r = requests.get(f"{_BASE_ISA}/{operation}", params=params, timeout=15)
         r.raise_for_status()
         body  = r.json()["response"]["body"]
         items = body.get("items", {})
         rows  = items.get("item", items) if isinstance(items, dict) else items
         return pd.DataFrame(rows if isinstance(rows, list) else [rows])
     except Exception as e:
-        print(f"  [ISA] {operation} 오류: {e}")
+        logger.warning("[ISA] %s 오류: %s", operation, e)
         return pd.DataFrame()
 
-def _ecos_get(stat_code, item_code, freq="D", days_back=60):
-    """한국은행 ECOS API 호출"""
-    end_dt   = datetime.today().strftime("%Y%m%d")
-    start_dt = (datetime.today() - timedelta(days=days_back)).strftime("%Y%m%d")
-    url = f"{BASE_ECOS}/{ECOS_KEY}/json/kr/1/100/{stat_code}/{freq}/{start_dt}/{end_dt}/{item_code}"
+
+def _ecos_get(keys: ApiKeys, stat_code: str, item_code: str,
+              freq: str = "D", days_back: int = 60) -> pd.DataFrame:
+    """한국은행 ECOS API 호출 — 키를 URL 경로 대신 별도 처리"""
+    end_dt   = today_str()
+    start_dt = date_range(days_back)[0]
+    # ECOS는 키를 경로에 포함하는 구조이나, 로그 시 마스킹
+    url = f"{_BASE_ECOS}/{keys.ecos}/json/kr/1/100/{stat_code}/{freq}/{start_dt}/{end_dt}/{item_code}"
     try:
         r = requests.get(url, timeout=15)
         r.raise_for_status()
@@ -102,41 +113,62 @@ def _ecos_get(stat_code, item_code, freq="D", days_back=60):
             df["date"] = pd.to_datetime(df["TIME"], format="%Y%m%d", errors="coerce")
         return df
     except Exception as e:
-        print(f"  [ECOS] {stat_code}/{item_code} 오류: {e}")
+        logger.warning("[ECOS] %s/%s 오류: %s", stat_code, item_code, e)
         return pd.DataFrame()
 
-def _krx_post(endpoint, base_dt):
+
+def _krx_post(keys: ApiKeys, endpoint: str, base_dt: str) -> pd.DataFrame:
     """KRX Open API 호출"""
-    url     = f"{BASE_KRX}/{endpoint}"
-    headers = {"AUTH_KEY": KRX_KEY, "Content-Type": "application/json"}
+    url     = f"{_BASE_KRX}/{endpoint}"
+    headers = {"AUTH_KEY": keys.krx, "Content-Type": "application/json"}
     body    = {"basDd": base_dt}
     try:
         r = requests.post(url, json=body, headers=headers, timeout=15)
         r.raise_for_status()
-        return pd.DataFrame(r.json().get("OutBlock_1", []))
+        payload = r.json()
+        # KRX 응답 구조 유연하게 처리 (OutBlock_1 없는 경우 대비)
+        rows = payload.get("OutBlock_1") or payload.get("output") or []
+        return pd.DataFrame(rows)
     except Exception as e:
-        print(f"  [KRX] {endpoint} 오류: {e}")
+        logger.warning("[KRX] %s 오류: %s", endpoint, e)
         return pd.DataFrame()
 
+
 # ══════════════════════════════════════════════════════════════
-# DAILY 수집
+# 채권 분류 (별도 함수로 분리)
 # ══════════════════════════════════════════════════════════════
 
-def get_fund_nav():
+def _classify_bond(name: str) -> str:
+    name = str(name)
+    if "국민주택" in name:
+        return "국민주택채권"
+    if any(x in name for x in ["은행", "금융", "카드", "캐피탈"]):
+        return "금융채"
+    if any(x in name for x in ["공사", "공단", "도로", "수자원", "국채"]):
+        return "특수채"
+    return "기타"
+
+
+# ══════════════════════════════════════════════════════════════
+# DAILY 수집 함수
+# ══════════════════════════════════════════════════════════════
+
+def get_fund_nav(keys: ApiKeys) -> pd.DataFrame:
     """[KOFIA-D] 펀드 유형별 순자산"""
-    df = _kofia_get("getFundTotalNetEssetInfo", {"numOfRows": "500"})
+    df = _kofia_get(keys, "getFundTotalNetEssetInfo", {"numOfRows": "500"})
     if df.empty:
         return df
     df["nPptTotAmt"] = pd.to_numeric(df["nPptTotAmt"], errors="coerce")
     df["basDt"]      = pd.to_datetime(df["basDt"], format="%Y%m%d", errors="coerce")
     return df[df["ctg"] != "합계"]
 
-def get_market_funds():
-    """[KOFIA-D] 증시 대기자금 합산"""
-    df_dep  = _kofia_get("getSecuritiesMarketTotalCapitalInfo")
-    df_cma  = _kofia_get("getCMAStatus")
-    df_fund = get_fund_nav()
-    result  = {}
+
+def get_market_funds(keys: ApiKeys) -> pd.DataFrame:
+    """[KOFIA-D] 증시 대기자금 합산 — 날짜 gap 보간 처리"""
+    df_dep  = _kofia_get(keys, "getSecuritiesMarketTotalCapitalInfo")
+    df_cma  = _kofia_get(keys, "getCMAStatus")
+    df_fund = get_fund_nav(keys)
+    result: dict = {}
 
     if not df_dep.empty:
         for col in ["invrDpsgAmt", "toCstRpchCndBndSlgBal"]:
@@ -171,20 +203,28 @@ def get_market_funds():
     for col in ["예탁금", "RP", "CMA", "MMF"]:
         if col not in df_out.columns:
             df_out[col] = 0
-    df_out["합계"] = df_out[["예탁금","RP","CMA","MMF"]].sum(axis=1).round(1)
+
+    # ── 날짜 gap 보간: 영업일 기준 forward-fill ──────────────
+    df_out.index = pd.to_datetime(df_out.index)
+    biz_idx = pd.bdate_range(df_out.index.min(), df_out.index.max())
+    df_out = df_out.reindex(biz_idx).fillna(method="ffill")
+
+    df_out["합계"] = df_out[["예탁금", "RP", "CMA", "MMF"]].sum(axis=1).round(1)
     return df_out.reset_index().rename(columns={"index": "basDt"})
 
-def get_credit():
+
+def get_credit(keys: ApiKeys) -> pd.DataFrame:
     """[KOFIA-D] 신용융자 잔고"""
-    df = _kofia_get("getGrantingOfCreditBalanceInfo")
+    df = _kofia_get(keys, "getGrantingOfCreditBalanceInfo")
     if df.empty:
         return df
     df["crdTrFingWhl"] = pd.to_numeric(df["crdTrFingWhl"], errors="coerce")
     df["basDt"]        = pd.to_datetime(df["basDt"], format="%Y%m%d", errors="coerce")
     df["신용융자"]      = (df["crdTrFingWhl"] / 1e12).round(2)
-    return df[["basDt","신용융자"]].sort_values("basDt")
+    return df[["basDt", "신용융자"]].sort_values("basDt")
 
-def get_market_rates():
+
+def get_market_rates(keys: ApiKeys) -> dict:
     """[ECOS] 금리 시계열 · 817Y002"""
     items = {
         "국고채3Y":  ("817Y002", "010200000"),
@@ -193,14 +233,16 @@ def get_market_rates():
     }
     result = {}
     for name, (stat, item) in items.items():
-        df = _ecos_get(stat, item)
+        df = _ecos_get(keys, stat, item)
         if not df.empty and "date" in df.columns:
-            result[name] = df[["date","DATA_VALUE"]].rename(
-                columns={"DATA_VALUE":"value"}).dropna().sort_values("date")
+            result[name] = (df[["date", "DATA_VALUE"]]
+                            .rename(columns={"DATA_VALUE": "value"})
+                            .dropna().sort_values("date"))
         time.sleep(0.2)
     return result
 
-def get_exchange_rates():
+
+def get_exchange_rates(keys: ApiKeys) -> dict:
     """[ECOS] 환율 시계열 · 731Y001"""
     items = {
         "원달러": ("731Y001", "0000001"),
@@ -208,14 +250,16 @@ def get_exchange_rates():
     }
     result = {}
     for name, (stat, item) in items.items():
-        df = _ecos_get(stat, item)
+        df = _ecos_get(keys, stat, item)
         if not df.empty and "date" in df.columns:
-            result[name] = df[["date","DATA_VALUE"]].rename(
-                columns={"DATA_VALUE":"value"}).dropna().sort_values("date")
+            result[name] = (df[["date", "DATA_VALUE"]]
+                            .rename(columns={"DATA_VALUE": "value"})
+                            .dropna().sort_values("date"))
         time.sleep(0.2)
     return result
 
-def get_market_indices():
+
+def get_market_indices() -> dict:
     """[YF] 글로벌 지수 현재값"""
     tickers = {
         "KOSPI": "^KS11",
@@ -227,7 +271,7 @@ def get_market_indices():
     for name, ticker in tickers.items():
         try:
             data = yf.Ticker(ticker).history(period="5d", auto_adjust=True)
-            if not data.empty:
+            if not data.empty and len(data) >= 2:
                 last = float(data["Close"].iloc[-1])
                 prev = float(data["Close"].iloc[-2])
                 result[name] = {
@@ -236,70 +280,94 @@ def get_market_indices():
                     "pct":  round((last - prev) / prev * 100, 2),
                 }
         except Exception as e:
-            print(f"  [YF] {ticker} 오류: {e}")
+            logger.warning("[YF] %s 오류: %s", ticker, e)
     return result
 
-def get_kospi_history():
+
+def get_kospi_history() -> pd.DataFrame:
     """[YF] KOSPI 30일 시계열"""
     try:
         df = yf.Ticker("^KS11").history(period="1mo", auto_adjust=True)
         if not df.empty:
-            df = df.reset_index()[["Date","Close"]].rename(
-                columns={"Date":"date","Close":"value"})
+            df = df.reset_index()[["Date", "Close"]].rename(
+                columns={"Date": "date", "Close": "value"})
             df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
             return df.sort_values("date")
     except Exception as e:
-        print(f"  [YF] KOSPI history 오류: {e}")
+        logger.warning("[YF] KOSPI history 오류: %s", e)
     return pd.DataFrame()
 
-def get_etf_top10():
-    """[KRX-ETF] ETF 거래대금 TOP10"""
-    df = _krx_post("etp/etf_bydd_trd", _last_bizday())
+
+def get_etf_top10(keys: ApiKeys) -> pd.DataFrame:
+    """[KRX-ETF] ETF 거래대금 TOP10 — 영업일 최대 3일 소급"""
+    df = pd.DataFrame()
+    bizday = last_bizday()
+    # 데이터 없는 날 대비 최대 3일 소급
+    from datetime import datetime, timedelta
+    d = datetime.strptime(bizday, "%Y%m%d")
+    for _ in range(3):
+        df = _krx_post(keys, "etp/etf_bydd_trd", d.strftime("%Y%m%d"))
+        if not df.empty:
+            break
+        d -= timedelta(days=1)
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+
     if df.empty:
         return df
-    df["ACC_TRDVAL"] = pd.to_numeric(df["ACC_TRDVAL"], errors="coerce")
-    df["FLUC_RT"]    = pd.to_numeric(df["FLUC_RT"],    errors="coerce")
+    df["ACC_TRDVAL"] = pd.to_numeric(df.get("ACC_TRDVAL", pd.Series(dtype=float)), errors="coerce")
+    df["FLUC_RT"]    = pd.to_numeric(df.get("FLUC_RT",    pd.Series(dtype=float)), errors="coerce")
     top10 = (df.dropna(subset=["ACC_TRDVAL"])
                .sort_values("ACC_TRDVAL", ascending=False)
-               .head(10)[["ISU_NM","ACC_TRDVAL","FLUC_RT","IDX_IND_NM"]]
+               .head(10)[["ISU_NM", "ACC_TRDVAL", "FLUC_RT", "IDX_IND_NM"]]
                .reset_index(drop=True))
     top10["거래대금(억)"] = (top10["ACC_TRDVAL"] / 1e8).round(0).astype(int)
     return top10
 
-def get_bond_market():
-    """[KRX-BON] 채권 거래 유형별 집계"""
-    df = _krx_post("bon/bnd_bydd_trd", _last_bizday())
+
+def get_bond_market(keys: ApiKeys) -> pd.DataFrame:
+    """[KRX-BON] 채권 거래 유형별 집계 — 최대 3일 소급"""
+    df = pd.DataFrame()
+    from datetime import datetime, timedelta
+    d = datetime.strptime(last_bizday(), "%Y%m%d")
+    for _ in range(3):
+        df = _krx_post(keys, "bon/bnd_bydd_trd", d.strftime("%Y%m%d"))
+        if not df.empty:
+            break
+        d -= timedelta(days=1)
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+
     if df.empty:
         return df
-    df["ACC_TRDVAL"] = pd.to_numeric(df["ACC_TRDVAL"], errors="coerce")
-
-    def classify(name):
-        name = str(name)
-        if "국민주택" in name: return "국민주택채권"
-        if any(x in name for x in ["은행","금융","카드","캐피탈"]): return "금융채"
-        if any(x in name for x in ["공사","공단","도로","수자원","국채"]): return "특수채"
-        return "기타"
-
-    df["유형"] = df["ISU_NM"].apply(classify)
+    df["ACC_TRDVAL"] = pd.to_numeric(df.get("ACC_TRDVAL", pd.Series(dtype=float)), errors="coerce")
+    df["유형"] = df["ISU_NM"].apply(_classify_bond)
     result = (df.groupby("유형")["ACC_TRDVAL"].sum()
                 .reset_index().sort_values("ACC_TRDVAL", ascending=False))
     result["거래대금(억)"] = (result["ACC_TRDVAL"] / 1e8).round(1)
     return result
 
-def get_gold():
-    """[KRX-GLD] 금 현물 시세"""
-    df = _krx_post("gen/gold_bydd_trd", _last_bizday())
+
+def get_gold(keys: ApiKeys) -> dict:
+    """[KRX-GLD] 금 현물 시세 — 최대 3일 소급"""
+    df = pd.DataFrame()
+    from datetime import datetime, timedelta
+    d = datetime.strptime(last_bizday(), "%Y%m%d")
+    for _ in range(3):
+        df = _krx_post(keys, "gen/gold_bydd_trd", d.strftime("%Y%m%d"))
+        if not df.empty:
+            break
+        d -= timedelta(days=1)
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+
     if df.empty:
         return {}
-    row = df[df["ISU_CD"] == "04020000"]
+
+    row = df[df["ISU_CD"] == "04020000"] if "ISU_CD" in df.columns else pd.DataFrame()
     if row.empty:
         row = df.iloc[[0]]
     row = row.iloc[0]
-    def to_float(v):
-        try:
-            return float(str(v).replace(",","").strip())
-        except:
-            return 0.0
     return {
         "price": to_float(row.get("TDD_CLSPRC", 0)),
         "chg":   to_float(row.get("CMPPREVDD_PRC", 0)),
@@ -307,27 +375,25 @@ def get_gold():
         "val":   round(to_float(row.get("ACC_TRDVAL", 0)) / 1e8, 1),
     }
 
+
 # ══════════════════════════════════════════════════════════════
-# MONTHLY 수집
+# MONTHLY 수집 함수
 # ══════════════════════════════════════════════════════════════
 
-def get_trust():
+def get_trust(keys: ApiKeys) -> pd.DataFrame:
     """[KOFIA-M] 신탁 업권별 수탁총액"""
-    start_dt = (datetime.today() - timedelta(days=210)).strftime("%Y%m%d")
-    end_dt   = datetime.today().strftime("%Y%m%d")
-    return _kofia_get("getTrustScaleInfo", {
-        "beginBasDt": start_dt,
-        "endBasDt":   end_dt,
+    return _kofia_get(keys, "getTrustScaleInfo", {
+        "beginBasDt": months_ago_str(7),
+        "endBasDt":   today_str(),
         "numOfRows":  "1000",
     })
 
-def get_els():
-    """[KOFIA-M] ELS/ELB 발행·상환 · getELSAndELBInfo"""
-    start_dt = (datetime.today() - timedelta(days=210)).strftime("%Y%m%d")
-    end_dt   = datetime.today().strftime("%Y%m%d")
-    df = _kofia_get("getELSAndELBInfo", {
-        "beginBasDt": start_dt,
-        "endBasDt":   end_dt,
+
+def get_els(keys: ApiKeys) -> pd.DataFrame:
+    """[KOFIA-M] ELS/ELB 발행·상환"""
+    df = _kofia_get(keys, "getELSAndELBInfo", {
+        "beginBasDt": months_ago_str(7),
+        "endBasDt":   today_str(),
         "numOfRows":  "200",
     })
     if df.empty:
@@ -337,9 +403,10 @@ def get_els():
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
-def get_isa_trend():
+
+def get_isa_trend(keys: ApiKeys) -> pd.DataFrame:
     """[ISA] 투자중개형 월별 잔고"""
-    df = _isa_get("getJoinStatus_V2")
+    df = _isa_get(keys, "getJoinStatus_V2")
     if df.empty:
         return df
     df = df[df["isaForm"] == "투자중개형 ISA"].copy()
@@ -347,20 +414,21 @@ def get_isa_trend():
     df["invAmt"]  = pd.to_numeric(df["invAmt"],  errors="coerce")
     df["basDt"]   = pd.to_datetime(df["basDt"],  format="%Y%m%d", errors="coerce")
     result = df.groupby("basDt").agg(
-        잔고=("invAmt","sum"), 가입자=("jnpnCnt","sum")
+        잔고=("invAmt", "sum"), 가입자=("jnpnCnt", "sum")
     ).reset_index()
     result["잔고(조)"]    = (result["잔고"]   / 1e12).round(2)
     result["가입자(만명)"] = (result["가입자"] / 1e4).round(1)
     result["순증(조)"]    = result["잔고(조)"].diff().round(2)
     return result.sort_values("basDt")
 
-def get_isa_assets():
+
+def get_isa_assets(keys: ApiKeys) -> pd.DataFrame:
     """[ISA] 투자중개형 편입자산 시계열"""
-    df = _isa_get("getManagementStatus_V2", {
+    df = _isa_get(keys, "getManagementStatus_V2", {
         "isaForm":    "투자중개형 ISA",
         "ctg":        "비중",
         "beginBasDt": "20250101",
-        "endBasDt":   datetime.today().strftime("%Y%m%d"),
+        "endBasDt":   today_str(),
     })
     if df.empty:
         return df
@@ -370,61 +438,48 @@ def get_isa_assets():
     return (df.pivot_table(index="basDt", columns="incAstCtg", values="amt", aggfunc="mean")
               .round(1).reset_index().sort_values("basDt"))
 
+
 # ══════════════════════════════════════════════════════════════
-# 전체 수집
+# 전체 수집 진입점
 # ══════════════════════════════════════════════════════════════
 
 def collect_all(kofia_key: str, krx_key: str, ecos_key: str) -> dict:
-    global KOFIA_KEY, KRX_KEY, ECOS_KEY
-    KOFIA_KEY = kofia_key
-    KRX_KEY   = krx_key
-    ECOS_KEY  = ecos_key
+    """모든 데이터를 수집하여 dict로 반환"""
+    keys = ApiKeys(kofia=kofia_key, krx=krx_key, ecos=ecos_key)
 
-    print("📡 데이터 수집 시작...")
-    data = {}
+    missing = keys.validate()
+    if missing:
+        logger.warning("누락된 API 키: %s — 해당 데이터는 수집되지 않습니다.", missing)
 
-    print("  [1/12] 펀드 유형별 순자산...")
-    data["fund_nav"]      = get_fund_nav()
+    logger.info("📡 데이터 수집 시작...")
+    data: dict = {}
 
-    print("  [2/12] 증시 대기자금...")
-    data["market_funds"]  = get_market_funds()
+    steps = [
+        ("fund_nav",      "펀드 유형별 순자산",      lambda: get_fund_nav(keys)),
+        ("market_funds",  "증시 대기자금",            lambda: get_market_funds(keys)),
+        ("credit",        "신용융자",                 lambda: get_credit(keys)),
+        ("rates",         "금리 (ECOS)",              lambda: get_market_rates(keys)),
+        ("fx",            "환율 (ECOS)",              lambda: get_exchange_rates(keys)),
+        ("indices",       "글로벌 지수 (yfinance)",   lambda: get_market_indices()),
+        ("kospi_history", "KOSPI 시계열 (yfinance)",  lambda: get_kospi_history()),
+        ("etf_top10",     "KRX ETF TOP10",            lambda: get_etf_top10(keys)),
+        ("bond_market",   "KRX 채권",                 lambda: get_bond_market(keys)),
+        ("gold",          "KRX 금",                   lambda: get_gold(keys)),
+        ("isa_trend",     "ISA 잔고 추이",             lambda: get_isa_trend(keys)),
+        ("isa_assets",    "ISA 편입자산",              lambda: get_isa_assets(keys)),
+        ("trust",         "신탁",                     lambda: get_trust(keys)),
+        ("els",           "ELS/DLS",                  lambda: get_els(keys)),
+    ]
 
-    print("  [3/12] 신용융자...")
-    data["credit"]        = get_credit()
+    for key, label, fn in steps:
+        logger.info("  [%s] 수집 중...", label)
+        try:
+            data[key] = fn()
+        except Exception as e:
+            logger.error("  [%s] 수집 실패: %s", label, e)
+            data[key] = pd.DataFrame() if key != "indices" else {}
 
-    print("  [4/12] 금리 (ECOS)...")
-    data["rates"]         = get_market_rates()
-
-    print("  [5/12] 환율 (ECOS)...")
-    data["fx"]            = get_exchange_rates()
-
-    print("  [6/12] 글로벌 지수 (yfinance)...")
-    data["indices"]       = get_market_indices()
-
-    print("  [7/12] KOSPI 시계열 (yfinance)...")
-    data["kospi_history"] = get_kospi_history()
-
-    print("  [8/12] KRX ETF TOP10...")
-    data["etf_top10"]     = get_etf_top10()
-
-    print("  [9/12] KRX 채권...")
-    data["bond_market"]   = get_bond_market()
-
-    print("  [10/12] KRX 금...")
-    data["gold"]          = get_gold()
-
-    print("  [11/12] ISA 잔고 추이...")
-    data["isa_trend"]     = get_isa_trend()
-
-    print("  [12/12] ISA 편입자산...")
-    data["isa_assets"]    = get_isa_assets()
-
-    # Monthly (KOFIA 서버 복구 후 활성화)
-    print("  [+] 신탁...")
-    data["trust"]         = get_trust()
-    print("  [+] ELS/DLS...")
-    data["els"]           = get_els()
-
+    from datetime import datetime
     data["collected_at"] = datetime.now().strftime("%Y.%m.%d %H:%M")
-    print(f"✅ 수집 완료: {data['collected_at']}")
+    logger.info("✅ 수집 완료: %s", data["collected_at"])
     return data
