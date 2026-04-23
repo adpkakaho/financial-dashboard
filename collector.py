@@ -164,48 +164,33 @@ def get_fund_nav(keys: ApiKeys) -> pd.DataFrame:
 
 
 def get_market_funds(keys: ApiKeys) -> pd.DataFrame:
-    """[KOFIA-D] 증시 대기자금 합산 — 날짜 gap 보간 처리"""
-    # 예탁금/RP: 두 엔드포인트 모두 시도 (API 명세 변경 대응)
-    df_dep = _kofia_get(keys, "getSecuritiesMarketTotalCapitalInfo")
-    if df_dep.empty:
-        df_dep = _kofia_get(keys, "getInvstorDeposit")  # 대체 엔드포인트
-
+    """[KOFIA-D] 증시 대기자금 합산 — 확인된 컬럼명 사용 + 날짜 gap 보간"""
+    # 컬럼 확인됨: basDt, invrDpsgAmt, toCstRpchCndBndSlgBal
+    df_dep  = _kofia_get(keys, "getSecuritiesMarketTotalCapitalInfo")
+    # 컬럼 확인됨: basDt, mngInvTgt, actBal
     df_cma  = _kofia_get(keys, "getCMAStatus")
-    if df_cma.empty:
-        df_cma = _kofia_get(keys, "getCmaBal")          # 대체 엔드포인트
-
     df_fund = get_fund_nav(keys)
     result: dict = {}
 
     if not df_dep.empty:
-        # 컬럼명 유연 탐지 (API 버전별 컬럼명 차이 대응)
-        dep_col = next((c for c in ["invrDpsgAmt", "invstDpsgAmt", "dpsgAmt"] if c in df_dep.columns), None)
-        rp_col  = next((c for c in ["toCstRpchCndBndSlgBal", "rpBal", "rpSlgBal"] if c in df_dep.columns), None)
-        dt_col  = next((c for c in ["basDt", "basDt", "baseDate"] if c in df_dep.columns), None)
-        if dep_col and dt_col:
-            df_dep[dep_col] = pd.to_numeric(df_dep[dep_col], errors="coerce")
-            df_dep[dt_col]  = pd.to_datetime(df_dep[dt_col], format="%Y%m%d", errors="coerce")
-            if rp_col:
-                df_dep[rp_col] = pd.to_numeric(df_dep[rp_col], errors="coerce")
-            for _, row in df_dep.iterrows():
-                dt = row[dt_col]
-                result.setdefault(dt, {})
-                result[dt]["예탁금"] = round(to_float(row[dep_col]) / 1e12, 1)
-                result[dt]["RP"]    = round(to_float(row[rp_col]) / 1e12, 1) if rp_col else 0
+        df_dep["invrDpsgAmt"]           = pd.to_numeric(df_dep["invrDpsgAmt"], errors="coerce")
+        df_dep["toCstRpchCndBndSlgBal"] = pd.to_numeric(df_dep["toCstRpchCndBndSlgBal"], errors="coerce")
+        df_dep["basDt"] = pd.to_datetime(df_dep["basDt"], format="%Y%m%d", errors="coerce")
+        for _, row in df_dep.iterrows():
+            dt = row["basDt"]
+            result.setdefault(dt, {})
+            result[dt]["예탁금"] = round(to_float(row["invrDpsgAmt"]) / 1e12, 1)
+            result[dt]["RP"]    = round(to_float(row["toCstRpchCndBndSlgBal"]) / 1e12, 1)
 
     if not df_cma.empty:
-        bal_col = next((c for c in ["actBal", "cmaBal", "bal"] if c in df_cma.columns), None)
-        dt_col  = next((c for c in ["basDt", "basDt", "baseDate"] if c in df_cma.columns), None)
-        tgt_col = next((c for c in ["mngInvTgt", "invTgt"] if c in df_cma.columns), None)
-        if bal_col and dt_col:
-            df_cma[bal_col] = pd.to_numeric(df_cma[bal_col], errors="coerce")
-            df_cma[dt_col]  = pd.to_datetime(df_cma[dt_col], format="%Y%m%d", errors="coerce")
-            if tgt_col:
-                df_cma = df_cma[df_cma[tgt_col] == "합계"]
-            cma_daily = df_cma.groupby(dt_col)[bal_col].sum()
-            for dt, val in cma_daily.items():
-                result.setdefault(dt, {})
-                result[dt]["CMA"] = round(val / 1e12, 1)
+        df_cma["actBal"] = pd.to_numeric(df_cma["actBal"], errors="coerce")
+        df_cma["basDt"]  = pd.to_datetime(df_cma["basDt"], format="%Y%m%d", errors="coerce")
+        # mngInvTgt == "합계" 행만 사용 (기관+개인 이중 집계 방지)
+        df_cma = df_cma[df_cma["mngInvTgt"] == "합계"]
+        cma_daily = df_cma.groupby("basDt")["actBal"].sum()
+        for dt, val in cma_daily.items():
+            result.setdefault(dt, {})
+            result[dt]["CMA"] = round(val / 1e12, 1)
 
     if not df_fund.empty:
         mmf = df_fund[df_fund["ctg"] == "단기금융"].groupby("basDt")["nPptTotAmt"].sum()
@@ -221,10 +206,10 @@ def get_market_funds(keys: ApiKeys) -> pd.DataFrame:
         if col not in df_out.columns:
             df_out[col] = 0
 
-    # ── 날짜 gap 보간: 영업일 기준 forward-fill ──────────────
+    # 영업일 기준 날짜 gap forward-fill
     df_out.index = pd.to_datetime(df_out.index)
     biz_idx = pd.bdate_range(df_out.index.min(), df_out.index.max())
-    df_out = df_out.reindex(biz_idx).fillna(method="ffill")
+    df_out = df_out.reindex(biz_idx).ffill()
 
     df_out["합계"] = df_out[["예탁금", "RP", "CMA", "MMF"]].sum(axis=1).round(1)
     return df_out.reset_index().rename(columns={"index": "basDt"})
