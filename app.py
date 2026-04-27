@@ -61,32 +61,35 @@ st.markdown("""
 
 
 # ── API 키 로드 ────────────────────────────────────────────────
-def _load_keys() -> tuple[str, str, str]:
+def _load_keys() -> tuple[str, str, str, str, str]:
     try:
         return (
             st.secrets["KOFIA_KEY"],
             st.secrets["KRX_KEY"],
             st.secrets["ECOS_KEY"],
+            st.secrets.get("NAVER_CLIENT_ID", ""),
+            st.secrets.get("NAVER_CLIENT_SECRET", ""),
         )
     except KeyError as e:
         st.sidebar.warning(f"⚠️ Secrets 누락: {e} — 해당 데이터는 수집되지 않습니다.")
-        return "", "", ""
+        return "", "", "", "", ""
     except Exception:
-        return "", "", ""
+        return "", "", "", "", ""
 
 
 # ── 데이터 수집 (24시간 캐시) ──────────────────────────────────
 @st.cache_data(ttl=86400, show_spinner="📡 데이터 수집 중...")
-def load_data(kofia_key: str, krx_key: str, ecos_key: str) -> dict:
-    return collect_all(kofia_key, krx_key, ecos_key)
+def load_data(kofia_key: str, krx_key: str, ecos_key: str,
+             naver_id: str = "", naver_secret: str = "") -> dict:
+    return collect_all(kofia_key, krx_key, ecos_key, naver_id, naver_secret)
 
 
 # ══════════════════════════════════════════════════════════════
 # 메인
 # ══════════════════════════════════════════════════════════════
 def main() -> None:
-    kofia_key, krx_key, ecos_key = _load_keys()
-    data = load_data(kofia_key, krx_key, ecos_key)
+    kofia_key, krx_key, ecos_key, naver_id, naver_secret = _load_keys()
+    data = load_data(kofia_key, krx_key, ecos_key, naver_id, naver_secret)
 
     # ── 사이드바: 메뉴 최상단 배치 ──
     with st.sidebar:

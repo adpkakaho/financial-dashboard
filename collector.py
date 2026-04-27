@@ -508,11 +508,68 @@ def get_isa_assets(keys: ApiKeys) -> pd.DataFrame:
               .round(1).reset_index().sort_values("basDt"))
 
 
+def get_news(naver_client_id: str, naver_client_secret: str, count: int = 3) -> list[dict]:
+    """[네이버 뉴스] 증권사 금융상품 관련 주요 뉴스 수집
+    네이버 검색 API: https://openapi.naver.com/v1/search/news.json
+    검색어: 증권사 금융상품 (최신순, 중복 제거)
+    반환: [{"title": str, "link": str, "pubDate": str, "description": str}]
+    """
+    if not naver_client_id or not naver_client_secret:
+        logger.warning("[NAVER] API 키 없음 — 뉴스 수집 건너뜀")
+        return []
+    try:
+        r = requests.get(
+            "https://openapi.naver.com/v1/search/news.json",
+            headers={
+                "X-Naver-Client-Id":     naver_client_id,
+                "X-Naver-Client-Secret": naver_client_secret,
+            },
+            params={
+                "query":  "증권사 금융상품",
+                "display": count * 3,   # 중복·광고성 제거 여유분
+                "sort":   "date",       # 최신순
+            },
+            timeout=10,
+        )
+        r.raise_for_status()
+        items = r.json().get("items", [])
+
+        news = []
+        seen = set()
+        for item in items:
+            # HTML 태그 제거
+            import re
+            title = re.sub(r"<[^>]+>", "", item.get("title", "")).strip()
+            desc  = re.sub(r"<[^>]+>", "", item.get("description", "")).strip()
+            link  = item.get("originallink") or item.get("link", "")
+
+            # 중복 타이틀 제거
+            if title in seen:
+                continue
+            seen.add(title)
+
+            news.append({
+                "title":       title,
+                "link":        link,
+                "pubDate":     item.get("pubDate", ""),
+                "description": desc,
+            })
+            if len(news) >= count:
+                break
+
+        logger.info("[NAVER] 뉴스 %d건 수집", len(news))
+        return news
+    except Exception as e:
+        logger.warning("[NAVER] 뉴스 수집 실패: %s", e)
+        return []
+
+
 # ══════════════════════════════════════════════════════════════
 # 전체 수집 진입점
 # ══════════════════════════════════════════════════════════════
 
-def collect_all(kofia_key: str, krx_key: str, ecos_key: str) -> dict:
+def collect_all(kofia_key: str, krx_key: str, ecos_key: str,
+                naver_client_id: str = "", naver_client_secret: str = "") -> dict:
     """모든 데이터를 수집하여 dict로 반환"""
     keys = ApiKeys(kofia=kofia_key, krx=krx_key, ecos=ecos_key)
 
@@ -542,6 +599,14 @@ def collect_all(kofia_key: str, krx_key: str, ecos_key: str) -> dict:
         ("els",           "ELS",                      lambda: get_els(keys)),
         ("dls",           "DLS",                      lambda: get_dls(keys)),
     ]
+
+    # 뉴스는 steps 루프 밖에서 별도 수집 (반환값이 list)
+    logger.info("  [뉴스 (네이버)] 수집 중...")
+    try:
+        data["news"] = get_news(naver_client_id, naver_client_secret)
+    except Exception as e:
+        logger.error("  [뉴스] 수집 실패: %s", e)
+        data["news"] = []
 
     for key, label, fn in steps:
         logger.info("  [%s] 수집 중...", label)
