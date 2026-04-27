@@ -121,38 +121,46 @@ def render(data: dict) -> None:
 
     st.divider()
 
-    # ── 주요 뉴스 ──────────────────────────────────────────────
+    # ── 주요 뉴스 (3영업일 이내 기사만, 0건이면 섹션 숨김) ──
     news = data.get("news", [])
     if news:
         st.markdown("### 📰 증권·금융상품 주요 뉴스")
-        st.caption("출처: 네이버 뉴스 검색 · 매일 갱신")
+        st.caption("출처: 네이버 뉴스 검색 · 직전 3영업일 기준 · 매일 갱신")
         for item in news:
-            # pubDate 파싱 (예: "Thu, 24 Apr 2026 10:30:00 +0900")
-            pub = item.get("pubDate", "")
-            try:
-                from email.utils import parsedate_to_datetime
-                pub_dt = parsedate_to_datetime(pub).strftime("%m/%d %H:%M")
-            except Exception:
-                pub_dt = pub[:16] if pub else ""
+            # pub_date: collector에서 이미 파싱된 "MM/DD" 문자열
+            pub_dt = item.get("pub_date", "")
+            if not pub_dt:
+                # 폴백: pubDate 직접 파싱
+                try:
+                    from email.utils import parsedate_to_datetime
+                    pub_dt = parsedate_to_datetime(
+                        item.get("pubDate", "")).strftime("%m/%d")
+                except Exception:
+                    pub_dt = ""
+
+            desc = item.get("description", "")
+            desc_short = desc[:80] + ("..." if len(desc) > 80 else "")
 
             st.markdown(f"""
             <div style="background:#fff;border:1px solid #E2E8F0;border-radius:10px;
-              padding:12px 16px;margin-bottom:8px;
-              transition:box-shadow 0.15s;">
-              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;">
+              padding:12px 16px;margin-bottom:8px;">
+              <div style="display:flex;justify-content:space-between;
+                          align-items:flex-start;gap:12px;">
                 <a href="{item['link']}" target="_blank"
                    style="color:#1E293B;font-size:13px;font-weight:600;
                           text-decoration:none;line-height:1.5;flex:1;">
                   {item['title']}
                 </a>
-                <span style="color:#94A3B8;font-size:11px;white-space:nowrap;">{pub_dt}</span>
+                <span style="color:#94A3B8;font-size:11px;
+                             white-space:nowrap;">{pub_dt}</span>
               </div>
               <div style="color:#64748B;font-size:12px;margin-top:4px;line-height:1.5;">
-                {item.get('description','')[:80]}{'...' if len(item.get('description','')) > 80 else ''}
+                {desc_short}
               </div>
             </div>
             """, unsafe_allow_html=True)
-    st.divider()
+        st.divider()
+    # news가 없으면 섹션 자체를 표시하지 않음 (divider도 생략)
 
     # ── 미니 차트 3개 ──
     c1, c2, c3 = st.columns(3)
