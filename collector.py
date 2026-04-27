@@ -510,58 +510,78 @@ def get_isa_assets(keys: ApiKeys) -> pd.DataFrame:
 
 def get_news(naver_client_id: str, naver_client_secret: str, count: int = 3) -> list[dict]:
     """[네이버 뉴스] 증권사 금융상품 관련 주요 뉴스 수집
-    네이버 검색 API: https://openapi.naver.com/v1/search/news.json
-    검색어: 증권사 금융상품 (최신순, 중복 제거)
+    A방식: 키워드별로 최신 1건씩 수집 후 중복 제거 → 최대 count건 반환
+    키워드는 실제 금융상품 출시·동향에 집중한 용어로 구성
     반환: [{"title": str, "link": str, "pubDate": str, "description": str}]
     """
+    import re
+
+    # 금융상품 출시·동향 집중 키워드 (카테고리별 1건씩 수집)
+    QUERIES = [
+        "ETF 신규 상장",
+        "펀드 출시 증권사",
+        "특판 RP 증권사",
+        "IMA 상품 출시",
+        "ELS 발행 신상품",
+        "랩어카운트 출시",
+        "신탁 상품 출시",
+        "비상장 사모펀드 증권사",
+        "국민성장펀드",
+    ]
+
     if not naver_client_id or not naver_client_secret:
         logger.warning("[NAVER] API 키 없음 — 뉴스 수집 건너뜀")
         return []
-    try:
-        r = requests.get(
-            "https://openapi.naver.com/v1/search/news.json",
-            headers={
-                "X-Naver-Client-Id":     naver_client_id,
-                "X-Naver-Client-Secret": naver_client_secret,
-            },
-            params={
-                "query":  "증권사 금융상품",
-                "display": count * 3,   # 중복·광고성 제거 여유분
-                "sort":   "date",       # 최신순
-            },
-            timeout=10,
-        )
-        r.raise_for_status()
-        items = r.json().get("items", [])
 
-        news = []
-        seen = set()
-        for item in items:
-            # HTML 태그 제거
-            import re
-            title = re.sub(r"<[^>]+>", "", item.get("title", "")).strip()
-            desc  = re.sub(r"<[^>]+>", "", item.get("description", "")).strip()
-            link  = item.get("originallink") or item.get("link", "")
+    headers = {
+        "X-Naver-Client-Id":     naver_client_id,
+        "X-Naver-Client-Secret": naver_client_secret,
+    }
 
-            # 중복 타이틀 제거
-            if title in seen:
-                continue
-            seen.add(title)
+    news = []
+    seen_titles = set()
+    seen_links  = set()
 
-            news.append({
-                "title":       title,
-                "link":        link,
-                "pubDate":     item.get("pubDate", ""),
-                "description": desc,
-            })
-            if len(news) >= count:
-                break
+    for query in QUERIES:
+        if len(news) >= count:
+            break
+        try:
+            r = requests.get(
+                "https://openapi.naver.com/v1/search/news.json",
+                headers=headers,
+                params={"query": query, "display": 3, "sort": "date"},
+                timeout=8,
+            )
+            r.raise_for_status()
+            items = r.json().get("items", [])
 
-        logger.info("[NAVER] 뉴스 %d건 수집", len(news))
-        return news
-    except Exception as e:
-        logger.warning("[NAVER] 뉴스 수집 실패: %s", e)
-        return []
+            for item in items:
+                title = re.sub(r"<[^>]+>", "", item.get("title", "")).strip()
+                desc  = re.sub(r"<[^>]+>", "", item.get("description", "")).strip()
+                link  = item.get("originallink") or item.get("link", "")
+
+                # 제목·링크 중복 제거
+                if title in seen_titles or link in seen_links:
+                    continue
+
+                seen_titles.add(title)
+                seen_links.add(link)
+                news.append({
+                    "title":       title,
+                    "link":        link,
+                    "pubDate":     item.get("pubDate", ""),
+                    "description": desc,
+                    "query":       query,   # 어떤 키워드로 찾았는지 (디버깅용)
+                })
+                break  # 키워드당 1건만
+
+            time.sleep(0.1)  # API 호출 간격
+
+        except Exception as e:
+            logger.warning("[NAVER] '%s' 검색 실패: %s", query, e)
+
+    logger.info("[NAVER] 뉴스 %d건 수집 (키워드 %d개 검색)", len(news), len(QUERIES))
+    return news[:count]
 
 
 # ══════════════════════════════════════════════════════════════
