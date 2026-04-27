@@ -509,29 +509,47 @@ def get_isa_assets(keys: ApiKeys) -> pd.DataFrame:
 
 
 def get_news(naver_client_id: str, naver_client_secret: str, count: int = 3) -> list[dict]:
-    """[네이버 뉴스] 증권사 금융상품 관련 주요 뉴스 수집
-    A방식: 키워드별로 최신 1건씩 수집 후 중복 제거 → 최대 count건 반환
-    키워드는 실제 금융상품 출시·동향에 집중한 용어로 구성
-    반환: [{"title": str, "link": str, "pubDate": str, "description": str}]
+    """[네이버 뉴스] 증권사 금융상품 관련 뉴스 수집
+    - 키워드별 최신 1건씩 수집 (A방식)
+    - 직전 3영업일(주말 제외) 기사 우선, 없으면 있는 것만 표시
+    - 0건이면 빈 리스트 반환 → summary.py에서 섹션 숨김 처리
     """
     import re
+    from email.utils import parsedate_to_datetime
 
-    # 금융상품 출시·동향 집중 키워드 (카테고리별 1건씩 수집)
+    # 금융상품 출시·실적·동향 확장 키워드
+    # 출시 이벤트 + 자금유입 동향 + 시장 동향까지 포함해 매일 기사 확보
     QUERIES = [
+        # ETF·펀드 (출시 + 동향·실적)
         "ETF 신규 상장",
+        "ETF 자금유입 동향",
         "펀드 출시 증권사",
+        "액티브 ETF 상장",
+        # 개별 금융상품 출시
         "특판 RP 증권사",
         "IMA 상품 출시",
         "ELS 발행 신상품",
         "랩어카운트 출시",
         "신탁 상품 출시",
         "비상장 사모펀드 증권사",
+        # 정책·시장 동향
         "국민성장펀드",
+        "증권사 금융상품 동향",
     ]
 
     if not naver_client_id or not naver_client_secret:
         logger.warning("[NAVER] API 키 없음 — 뉴스 수집 건너뜀")
         return []
+
+    # 직전 3영업일 계산 (주말 제외, 공휴일 미적용)
+    from datetime import date as _date, timedelta as _td
+    _bizdays = []
+    _d = _date.today()
+    while len(_bizdays) < 3:
+        _d -= _td(days=1)
+        if _d.weekday() < 5:   # 월(0)~금(4)만 포함
+            _bizdays.append(_d)
+    cutoff_date = _bizdays[-1]  # 3영업일 전 날짜
 
     headers = {
         "X-Naver-Client-Id":     naver_client_id,
@@ -549,7 +567,7 @@ def get_news(naver_client_id: str, naver_client_secret: str, count: int = 3) -> 
             r = requests.get(
                 "https://openapi.naver.com/v1/search/news.json",
                 headers=headers,
-                params={"query": query, "display": 3, "sort": "date"},
+                params={"query": query, "display": 5, "sort": "date"},
                 timeout=8,
             )
             r.raise_for_status()
@@ -559,8 +577,16 @@ def get_news(naver_client_id: str, naver_client_secret: str, count: int = 3) -> 
                 title = re.sub(r"<[^>]+>", "", item.get("title", "")).strip()
                 desc  = re.sub(r"<[^>]+>", "", item.get("description", "")).strip()
                 link  = item.get("originallink") or item.get("link", "")
+                pub   = item.get("pubDate", "")
 
-                # 제목·링크 중복 제거
+                # 날짜 파싱 — 3영업일 이내 기사만 허용
+                try:
+                    pub_date = parsedate_to_datetime(pub).date()
+                    if pub_date < cutoff_date:
+                        continue   # 너무 오래된 기사 스킵
+                except Exception:
+                    continue       # 날짜 파싱 실패 시 스킵
+
                 if title in seen_titles or link in seen_links:
                     continue
 
@@ -569,18 +595,20 @@ def get_news(naver_client_id: str, naver_client_secret: str, count: int = 3) -> 
                 news.append({
                     "title":       title,
                     "link":        link,
-                    "pubDate":     item.get("pubDate", ""),
+                    "pubDate":     pub,
+                    "pub_date":    pub_date.strftime("%m/%d"),
                     "description": desc,
-                    "query":       query,   # 어떤 키워드로 찾았는지 (디버깅용)
+                    "query":       query,
                 })
-                break  # 키워드당 1건만
+                break  # 키워드당 최대 1건
 
-            time.sleep(0.1)  # API 호출 간격
+            time.sleep(0.1)
 
         except Exception as e:
             logger.warning("[NAVER] '%s' 검색 실패: %s", query, e)
 
-    logger.info("[NAVER] 뉴스 %d건 수집 (키워드 %d개 검색)", len(news), len(QUERIES))
+    logger.info("[NAVER] 뉴스 %d건 수집 (기준: %s 이후, 키워드 %d개)",
+                len(news), cutoff_date, len(QUERIES))
     return news[:count]
 
 
